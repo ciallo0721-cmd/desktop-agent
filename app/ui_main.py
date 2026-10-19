@@ -11,6 +11,7 @@ import queue
 import threading
 import tkinter as tk
 import traceback
+from tkinter import font as tkfont
 from tkinter import messagebox
 
 import customtkinter as ctk
@@ -84,13 +85,28 @@ def bind_tree(widget, sequence: str, handler) -> None:
 # ==========================================================================
 
 class ChatBubble(ctk.CTkFrame):
+    """一条消息。
+
+    文字用 tk.Text 渲染（不是 CTkLabel）——CTkLabel 是 canvas 画的图，
+    选不中、拖不了、Ctrl+C 拿不到东西。Text 才能拖拽选区。
+    """
+
+    MAX_W = 600
+    OUT_X = 8
+    OUT_Y = 6
+    TXT_PADX = 6
+    TXT_PADY = 6
+
     def __init__(self, master, role: str):
         super().__init__(master, fg_color="transparent")
         self.role = role
         self._text = ""
         self._timer = None
+        self._fit_job = None
         is_user = role == "user"
         bg = C_USER if is_user else C_AI
+        self._font = tkfont.Font(family=FONT, size=13)
+        self._lh = self._font.metrics("linespace")
 
         # 一行：气泡 + 复制按钮
         self.row = ctk.CTkFrame(self, fg_color="transparent")
@@ -101,13 +117,29 @@ class ChatBubble(ctk.CTkFrame):
             anchor="e" if is_user else "w",
         )
 
-        self.box = ctk.CTkFrame(self.row, fg_color=bg, corner_radius=10)
-        self.label = ctk.CTkLabel(
-            self.box, text="", justify="left", anchor="w", wraplength=580,
-            font=ctk.CTkFont(family=FONT, size=13),
-            text_color="#1F2328",
+        self.box = ctk.CTkFrame(self.row, fg_color=bg, corner_radius=9,
+                                width=220, height=self._lh + 26)
+        self.box.pack_propagate(False)
+
+        self.txt = tk.Text(
+            self.box, bg=bg, fg="#1F2328", font=(FONT, 13), bd=0, relief="flat",
+            highlightthickness=0, wrap="word",
+            padx=self.TXT_PADX, pady=self.TXT_PADY,
+            cursor="xterm", state="disabled", insertwidth=0,
+            selectbackground="#9CC6FF", selectforeground="#101010",
+            spacing1=0, spacing3=2, takefocus=1, inactiveselectbackground="#C7DCF7",
         )
-        self.label.pack(padx=13, pady=9)
+        self.txt.pack(fill="both", expand=True,
+                      padx=self.OUT_X, pady=self.OUT_Y)
+
+        # 拖拽选区由 Text 原生支持；这几个键得自己接，Tk 的 Ctrl+A 是"回到行首"
+        for seq in ("<Control-a>", "<Control-A>"):
+            self.txt.bind(seq, self._select_all)
+        for seq in ("<Control-c>", "<Control-C>"):
+            self.txt.bind(seq, self._copy_sel)
+        self.txt.bind("<MouseWheel>", self._wheel)
+        self.txt.bind("<Button-4>", self._wheel)
+        self.txt.bind("<Button-5>", self._wheel)
 
         self.btn = self._make_copy_btn(self.row)
         if is_user:
@@ -118,6 +150,81 @@ class ChatBubble(ctk.CTkFrame):
             self.btn.pack(side="left", padx=(4, 0))
 
         bind_tree(self, "<Button-3>", self._popup)
+
+    # -- 尺寸 ----------------------------------------------------------
+    def _scroll_canvas(self):
+        p = self.master
+        while p is not None:
+            c = getattr(p, "_parent_canvas", None)
+            if c is not None:
+                return c
+            p = getattr(p, "master", None)
+        return None
+
+    def _wheel(self, e):
+        """把滚轮让给外层聊天区，不然 Text 会吃掉滚动。"""
+        try:
+            c = self._scroll_canvas()
+            if c is not None:
+                if getattr(e, "num", None) == 4:
+                    step = -1
+                elif getattr(e, "num", None) == 5:
+                    step = 1
+                else:
+                    step = -1 if e.delta > 0 else 1
+                c.yview_scroll(step, "units")
+        except Exception:
+            pass
+        return "break"
+
+    def _schedule_fit(self) -> None:
+        if self._fit_job:
+            return
+        try:
+            # 50ms 节流：流式时把多次 set_text 合并成一次重排，不然每帧 update_idletasks 太重
+            self._fit_job = self.after(50, self._fit)
+        except Exception:
+            self._fit_job = None
+
+    def _fit(self) -> None:
+        """按内容算气泡像素尺寸。先估算，再用真实渲染行数校正。"""
+        self._fit_job = None
+        try:
+            if not self.winfo_exists():
+                return
+            text = self._text or " "
+            lines = text.split("\n")
+            px = [self._font.measure(ln) for ln in lines]
+            need = max(px) if px else 0
+            pad = 2 * (self.OUT_X + self.TXT_PADX)
+            box_w = min(self.MAX_W, max(80, need + pad + 10))
+            inner = max(24, box_w - pad - 6)
+
+            n = 0
+            for w in px:
+                n += 1 if w <= inner else (int(w) + int(inner) - 1) // int(inner)
+            n = max(1, n)
+
+            box_h = n * (self._lh + 2) + 2 * (self.OUT_Y + self.TXT_PADY) + 8
+            self.box.configure(width=int(box_w), height=int(box_h))
+            self.box.update_idletasks()
+
+            try:
+                # displaylines 数的是「跨过几次换行边界」，行数要 +1
+                real = self.txt.count("1.0", "end-1c", "displaylines")
+                if isinstance(real, (tuple, list)):
+                    real = real[0] if real else 0
+                real = int(real or 0) + 1
+                if real > 0:
+                    h2 = real * (self._lh + 2) + 2 * (self.OUT_Y + self.TXT_PADY) + 8
+                    # 宁可多几像素留白，也不要裁掉文字
+                    if h2 > box_h:
+                        box_h = h2
+                    self.box.configure(height=int(box_h))
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     # -- 复制按钮 ------------------------------------------------------
     def _make_copy_btn(self, parent) -> ctk.CTkButton:
@@ -146,17 +253,63 @@ class ChatBubble(ctk.CTkFrame):
         except Exception:
             pass
 
+    # -- 文本与选区 ----------------------------------------------------
     def set_text(self, text: str) -> None:
-        self._text = text
-        self.label.configure(text=text)
+        new = text or ""
+        old = self._text
+        try:
+            self.txt.configure(state="normal")
+            if old and new.startswith(old):
+                self.txt.insert("end-1c", new[len(old):])
+            else:
+                self.txt.delete("1.0", "end")
+                self.txt.insert("1.0", new)
+            self.txt.configure(state="disabled")
+        except Exception:
+            pass
+        self._text = new
+        self._schedule_fit()
+
+    def _select_all(self, _e=None):
+        try:
+            self.txt.tag_add("sel", "1.0", "end-1c")
+            self.txt.mark_set("insert", "1.0")
+        except Exception:
+            pass
+        return "break"
+
+    def _copy_sel(self, _e=None):
+        """有选区就复制选区，没选区复制整条。"""
+        try:
+            sel = self.txt.get("sel.first", "sel.last")
+        except tk.TclError:
+            sel = ""
+        target = sel or self._text
+        if not target:
+            return "break"
+        if copy_to_clipboard(target):
+            self._flash("已复制选中" if sel else "已复制")
+        else:
+            self._flash("复制失败", "#C0392B")
+        return "break"
 
     def _popup(self, event) -> None:
         menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="复制选中", command=self._copy_selection_only)
         menu.add_command(label="复制这一条", command=self.copy_text)
+        menu.add_separator()
+        menu.add_command(label="全选", command=self._select_all)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _copy_selection_only(self) -> None:
+        try:
+            sel = self.txt.get("sel.first", "sel.last")
+            copy_to_clipboard(sel)
+        except tk.TclError:
+            pass
 
     def copy_text(self) -> None:
         if not self._text:
