@@ -1,0 +1,26 @@
+# 不进版本库的东西
+
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# 本地配置里有 API Key，绝对不要提交
+data/config.json
+
+# 运行期数据
+data/conversations/*
+!data/conversations/.gitkeep
+data/backup/
+data/trash/
+data/tmp/
+data/screenshots/*
+!data/screenshots/.gitkeep
+data/agent.log
+
+# agent 的干活目录，内容随任务变
+workspace/*
+!workspace/.gitkeep
+
+# 会话记录
+.workbuddy/
