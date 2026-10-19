@@ -31,6 +31,54 @@ C_MUTED = "#8A9099"
 C_ERR = "#FDECEC"
 
 
+def copy_to_clipboard(text: str) -> bool:
+    """往系统剪贴板写文本。
+
+    先走 pyperclip（Win32 API，内容能一直留在剪贴板，不怕程序退出），
+    失败再退回 tkinter 自带剪贴板。
+    """
+    if not text:
+        return False
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return True
+    except Exception:
+        pass
+    try:
+        root = tk._default_root
+        if root is None:
+            return False
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update()
+        return True
+    except Exception:
+        return False
+
+
+def bind_tree(widget, sequence: str, handler) -> None:
+    """把事件绑到整棵子树（含 customtkinter 内部的 canvas/label）。
+
+    CTkFrame 的 bind 只作用于 frame 本身，而它上面盖着 canvas，
+    鼠标点击实际落在 canvas 上，所以必须递归绑。
+    """
+    seen = set()
+
+    def walk(w):
+        if id(w) in seen:
+            return
+        seen.add(id(w))
+        try:
+            w.bind(sequence, handler, add="+")
+        except Exception:
+            pass
+        for ch in w.winfo_children():
+            walk(ch)
+
+    walk(widget)
+
+
 # ==========================================================================
 # 气泡
 # ==========================================================================
@@ -40,14 +88,20 @@ class ChatBubble(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self.role = role
         self._text = ""
+        self._timer = None
         is_user = role == "user"
         bg = C_USER if is_user else C_AI
-        self.box = ctk.CTkFrame(self, fg_color=bg, corner_radius=10)
-        if is_user:
-            self.box.pack(side="right", padx=(80, 12), pady=4, anchor="e")
-        else:
-            self.box.pack(side="left", padx=(12, 80), pady=4, anchor="w")
 
+        # 一行：气泡 + 复制按钮
+        self.row = ctk.CTkFrame(self, fg_color="transparent")
+        self.row.pack(
+            side="right" if is_user else "left",
+            padx=(80, 8) if is_user else (12, 80),
+            pady=4,
+            anchor="e" if is_user else "w",
+        )
+
+        self.box = ctk.CTkFrame(self.row, fg_color=bg, corner_radius=10)
         self.label = ctk.CTkLabel(
             self.box, text="", justify="left", anchor="w", wraplength=580,
             font=ctk.CTkFont(family=FONT, size=13),
@@ -55,8 +109,42 @@ class ChatBubble(ctk.CTkFrame):
         )
         self.label.pack(padx=13, pady=9)
 
-        for w in (self, self.box, self.label):
-            w.bind("<Button-3>", self._popup)
+        self.btn = self._make_copy_btn(self.row)
+        if is_user:
+            self.box.pack(side="right")
+            self.btn.pack(side="right", padx=(0, 4))
+        else:
+            self.box.pack(side="left")
+            self.btn.pack(side="left", padx=(4, 0))
+
+        bind_tree(self, "<Button-3>", self._popup)
+
+    # -- 复制按钮 ------------------------------------------------------
+    def _make_copy_btn(self, parent) -> ctk.CTkButton:
+        return ctk.CTkButton(
+            parent, text="复制", width=44, height=22, corner_radius=6,
+            fg_color="transparent", hover_color="#E4E8EE", border_width=0,
+            text_color="#A8AEB6", font=ctk.CTkFont(family=FONT, size=10),
+            command=self.copy_text,
+        )
+
+    def _flash(self, text: str, color: str = "#2E7D32") -> None:
+        try:
+            if not self.btn.winfo_exists():
+                return
+            self.btn.configure(text=text, text_color=color)
+            if self._timer:
+                self.after_cancel(self._timer)
+            self._timer = self.after(1200, self._unflash)
+        except Exception:
+            pass
+
+    def _unflash(self) -> None:
+        try:
+            if self.btn.winfo_exists():
+                self.btn.configure(text="复制", text_color="#A8AEB6")
+        except Exception:
+            pass
 
     def set_text(self, text: str) -> None:
         self._text = text
@@ -64,7 +152,7 @@ class ChatBubble(ctk.CTkFrame):
 
     def _popup(self, event) -> None:
         menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="复制这一段", command=self.copy_text)
+        menu.add_command(label="复制这一条", command=self.copy_text)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -72,14 +160,18 @@ class ChatBubble(ctk.CTkFrame):
 
     def copy_text(self) -> None:
         if not self._text:
+            self._flash("空消息", "#C0392B")
             return
-        self.clipboard_clear()
-        self.clipboard_append(self._text)
+        if copy_to_clipboard(self._text):
+            self._flash("已复制")
+        else:
+            self._flash("复制失败", "#C0392B")
 
 
 class ErrorBubble(ctk.CTkFrame):
     def __init__(self, master, text: str):
         super().__init__(master, fg_color="transparent")
+        self._text = text or ""
         box = ctk.CTkFrame(self, fg_color=C_ERR, corner_radius=10,
                            border_width=1, border_color="#F3C9C9")
         box.pack(side="left", padx=(12, 60), pady=4, anchor="w")
@@ -87,6 +179,15 @@ class ErrorBubble(ctk.CTkFrame):
             box, text=text, justify="left", anchor="w", wraplength=580,
             font=ctk.CTkFont(family=FONT, size=12), text_color="#A32A2A",
         ).pack(padx=13, pady=9)
+        bind_tree(self, "<Button-3>", self._popup)
+
+    def _popup(self, event) -> None:
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="复制报错", command=lambda: copy_to_clipboard(self._text))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
 
 class ToolCard(ctk.CTkFrame):
@@ -96,16 +197,23 @@ class ToolCard(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self.name = name
         self.done = False
-        self.box = ctk.CTkFrame(self, fg_color=C_TOOL, corner_radius=8,
+        self._full = ""
+        self._timer = None
+
+        self.row = ctk.CTkFrame(self, fg_color="transparent")
+        self.row.pack(side="left", padx=(12, 60), pady=3, anchor="w")
+
+        self.box = ctk.CTkFrame(self.row, fg_color=C_TOOL, corner_radius=8,
                                 border_width=1, border_color="#F0E0A8")
-        self.box.pack(side="left", padx=(12, 70), pady=3, anchor="w")
+        self.box.pack(side="left")
 
         head = name if not detail else f"{name}  {detail}"
-        ctk.CTkLabel(
+        self.head_label = ctk.CTkLabel(
             self.box, text="› " + head, justify="left", anchor="w",
             wraplength=600, font=ctk.CTkFont(family=FONT_MONO, size=11),
             text_color="#7A6A2A",
-        ).pack(padx=10, pady=(7, 2), anchor="w")
+        )
+        self.head_label.pack(padx=10, pady=(7, 2), anchor="w")
 
         self.body = ctk.CTkLabel(
             self.box, text="执行中…", justify="left", anchor="w",
@@ -113,10 +221,15 @@ class ToolCard(ctk.CTkFrame):
             text_color="#9A8B55",
         )
         self.body.pack(padx=10, pady=(0, 7), anchor="w")
-        self._full = ""
 
-        for w in (self, self.box, self.body):
-            w.bind("<Button-3>", self._popup)
+        self.btn = ctk.CTkButton(
+            self.row, text="复制", width=44, height=22, corner_radius=6,
+            fg_color="transparent", hover_color="#EFE2B8", border_width=0,
+            text_color="#B0A170", font=ctk.CTkFont(family=FONT, size=10),
+            command=self._copy,
+        )
+        self.btn.pack(side="left", padx=(4, 0))
+        bind_tree(self, "<Button-3>", self._popup)
 
     def set_result(self, text: str) -> None:
         self.done = True
@@ -134,11 +247,32 @@ class ToolCard(ctk.CTkFrame):
         finally:
             menu.grab_release()
 
+    def _flash(self, text: str, color: str = "#2E7D32") -> None:
+        try:
+            if not self.btn.winfo_exists():
+                return
+            self.btn.configure(text=text, text_color=color)
+            if self._timer:
+                self.after_cancel(self._timer)
+            self._timer = self.after(1200, self._unflash)
+        except Exception:
+            pass
+
+    def _unflash(self) -> None:
+        try:
+            if self.btn.winfo_exists():
+                self.btn.configure(text="复制", text_color="#B0A170")
+        except Exception:
+            pass
+
     def _copy(self) -> None:
         if not self._full:
+            self._flash("无内容", "#C0392B")
             return
-        self.clipboard_clear()
-        self.clipboard_append(self._full)
+        if copy_to_clipboard(self._full):
+            self._flash("已复制")
+        else:
+            self._flash("复制失败", "#C0392B")
 
 
 # ==========================================================================
@@ -560,9 +694,12 @@ class App(ctk.CTk):
 
     def _copy_last_ai(self, _event=None):
         if not self._last_ai_text:
+            self._status("还没有可复制的 AI 回复")
             return "break"
-        self.clipboard_clear()
-        self.clipboard_append(self._last_ai_text)
+        if copy_to_clipboard(self._last_ai_text):
+            self._status("已复制上一条 AI 回复")
+        else:
+            self._status("复制失败，试试右键菜单")
         return "break"
 
     def _add_tool_card(self, name: str, detail: str) -> ToolCard:

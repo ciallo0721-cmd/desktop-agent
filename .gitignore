@@ -9,6 +9,7 @@ __pycache__/
 data/config.json
 
 # 运行期数据
+prompt/memory.md
 data/conversations/*
 !data/conversations/.gitkeep
 data/backup/
