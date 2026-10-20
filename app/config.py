@@ -17,6 +17,7 @@ CONV_DIR = DATA_DIR / "conversations"
 CONV_TRASH_DIR = DATA_DIR / "trash"
 CONV_BACKUP_DIR = DATA_DIR / "backup"
 SHOT_DIR = DATA_DIR / "screenshots"
+IMAGE_DIR = DATA_DIR / "images"          # 用户发进来的图片（自动发送前已缩放）
 WORK_DIR = BASE_DIR / "workspace"
 PROMPT_DIR = BASE_DIR / "prompt"
 CONFIG_PATH = DATA_DIR / "config.json"
@@ -71,7 +72,7 @@ DEFAULT_CONFIG = {
 
 def ensure_dirs() -> None:
     for d in (DATA_DIR, CONV_DIR, CONV_TRASH_DIR, CONV_BACKUP_DIR,
-              SHOT_DIR, WORK_DIR, PROMPT_DIR):
+              SHOT_DIR, IMAGE_DIR, WORK_DIR, PROMPT_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 

@@ -47,12 +47,46 @@ DANGEROUS_PATTERNS = [
 ]
 
 
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"", re.S)
+
+# 「把字符串当命令执行」的外壳：bash -c / sh -c / cmd /c / powershell -Command。
+# 只有这种写法，引号里的内容才真的要当命令跑。
+_EXEC_SHELL = re.compile(
+    r"\b(?:bash|sh|zsh|cmd|powershell|pwsh)\b[^\n]{0,30}?(?:\s-[a-zA-Z]*c[a-zA-Z]*\b|\s/[ck]\b)",
+    re.I,
+)
+
+
+def _strip_quoted(cmd: str) -> str:
+    """把引号包裹的内容抹成空串。
+
+    grep -n 'shutdown|rm -r' file   这种是「搜这些词」，不是「执行这些词」，
+    不抹掉就天天误报。
+    """
+    return _QUOTED.sub("''", cmd)
+
+
 def detect_danger(cmd: str) -> str | None:
-    """返回命中的风险说明，没命中返回 None。"""
+    """返回命中的风险说明，没命中返回 None。
+
+    判定分两步，避免把搜索词当成命令：
+      1. 先只看引号外的部分（真正的命令和参数）。
+      2. 只有当命令里带 bash -c / cmd /c / powershell -Command 这类
+         「把字符串当命令跑」的外壳时，才连引号里的内容一起查，
+         否则 bash -c "shutdown /s" 会被漏掉。
+    """
     flat = " ".join(cmd.split())
+    outside = _strip_quoted(flat)
+
     for pat, why in DANGEROUS_PATTERNS:
-        if re.search(pat, flat, flags=re.I):
+        if re.search(pat, outside, flags=re.I):
             return why
+
+    if _EXEC_SHELL.search(outside):
+        for pat, why in DANGEROUS_PATTERNS:
+            if re.search(pat, flat, flags=re.I):
+                return why
+
     return None
 
 
@@ -122,19 +156,22 @@ def run_bash(cfg: dict, cmd: str, confirm=None, cancel=None) -> str:
 
     sandbox = bool(cfg.get("sandbox", True))
 
-    if sandbox:
-        why = detect_danger(cmd)
-        if why:
-            if confirm is None:
-                return (
-                    f"【被沙箱拦截】这条命令命中了高危规则（{why}），没有交互环境可以确认，拒绝执行。\n"
-                    "如果确实需要执行，请让用户在设置里调整。"
-                )
-            if not confirm(cmd, why):
-                return (
-                    f"【用户拒绝】用户没有批准这条命令（{why}）。\n"
-                    "换个安全的方式重做，或者先问清楚用户到底想干什么。"
-                )
+    # 高危检测始终生效，不跟 sandbox 绑在一起。
+    # sandbox 只管「工作目录锁在 workspace/」，关掉它不该顺手把确认也一起关掉 ——
+    # 否则用户只是想放开目录限制，却等于同意了 rm -rf / 直接执行。
+    why = detect_danger(cmd)
+    if why:
+        if confirm is None:
+            return (
+                f"【已拦截】这条命令命中了高危规则（{why}），"
+                "当前没有交互环境可以确认，已拒绝执行。\n"
+                "如果确实需要执行，请在有界面的模式下重新发一次。"
+            )
+        if not confirm(cmd, why):
+            return (
+                f"【用户拒绝】用户没有批准这条命令（{why}）。\n"
+                "换个安全的方式重做，或者先问清楚用户到底想干什么。"
+            )
 
     bash = config.find_bash(cfg)
     cwd = str(config.WORK_DIR if sandbox else config.BASE_DIR)

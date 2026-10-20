@@ -17,7 +17,11 @@ data/trash/
 data/tmp/
 data/screenshots/*
 !data/screenshots/.gitkeep
+# 用户发进来的图片：可能含隐私，一个都不进库
+data/images/
 data/agent.log
+data/crash.log
+data/tui.log
 
 # agent 的干活目录，内容随任务变
 workspace/*

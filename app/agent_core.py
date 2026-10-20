@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 
 from . import config, llm, memory, prompts, tools, websearch
+from . import images as images_mod
 
 # ```action\n{...}\n```
 ACTION_FENCE = re.compile(r"```[ \t]*action[ \t]*\r?\n?(.*?)```", re.S | re.I)
@@ -312,12 +313,19 @@ class Conversation:
             os.replace(self.path, dest)
         except OSError:
             pass
+        # 图片跟着走，别在 data/images 里留一堆没人认领的文件
+        images_mod.drop_conv(self.id)
 
     # ---------------- 消息 ----------------
-    def add_user(self, text: str) -> None:
-        self.messages.append({"role": "user", "content": text})
+    def add_user(self, text: str, images: list[str] | None = None) -> None:
+        msg = {"role": "user", "content": text}
+        if images:
+            msg["images"] = list(images)
+        self.messages.append(msg)
         if self.title in ("新对话", "") and text.strip():
             self.title = " ".join(text.split())[:24]
+        elif self.title in ("新对话", "") and images:
+            self.title = f"[图片] {Path(images[0]).name}"[:24]
         self.save()
 
     def add_assistant(self, text: str) -> None:
@@ -348,14 +356,26 @@ class Conversation:
                     continue
                 out.append(m)
                 continue
-            if (m.get("content") or "").strip():
+            # 只发图不打字的消息也要显示，否则界面上凭空少一条
+            if (m.get("content") or "").strip() or m.get("images"):
                 out.append(m)
         return out
 
     def to_api_messages(self, limit: int = 24) -> list[dict]:
-        """转成 OpenAI 格式。工具结果伪装成 user 消息，兼容性最好。"""
+        """转成 OpenAI 格式。工具结果伪装成 user 消息，兼容性最好。
+
+        图片只在「最近一条带图的消息」里发原图，更早的降级成一句占位：
+        否则历史里堆五六张图，每次请求体都是十几 MB。
+        """
+        window = self.messages[-max(2, limit):]
+
+        last_img = -1
+        for i, m in enumerate(window):
+            if m.get("role") == "user" and m.get("images"):
+                last_img = i
+
         rows: list[dict] = []
-        for m in self.messages[-max(2, limit):]:
+        for i, m in enumerate(window):
             role = m.get("role")
             content = m.get("content") or ""
             if m.get("tool_result"):
@@ -365,8 +385,34 @@ class Conversation:
                     "content": TOOL_RESULT_PREFIX.format(name=name) + "\n" + content,
                 })
             elif role in ("user", "assistant"):
+                imgs = m.get("images") or []
+                if imgs and role == "user":
+                    if i != last_img:
+                        rows.append({
+                            "role": "user",
+                            "content": content + "\n（这里原本有图片，已经省略）",
+                        })
+                        continue
+                    parts: list[dict] = []
+                    if content.strip():
+                        parts.append({"type": "text", "text": content})
+                    n = 0
+                    for rel in imgs:
+                        got = images_mod.api_parts(rel)
+                        if got:
+                            parts += got
+                            n += 1
+                    if n:
+                        rows.append({"role": "user", "content": parts})
+                    else:
+                        rows.append({"role": "user",
+                                     "content": content + "\n（图片读取失败，没有发出去）"})
+                    continue
+
                 if content.strip():
                     rows.append({"role": role, "content": content})
+                elif imgs:
+                    rows.append({"role": role, "content": "（图片）"})
         return rows
 
 
@@ -537,9 +583,11 @@ class AgentRunner:
         self.cfg = cfg
         self.conv = conv
 
-    def run(self, user_text: str, emit, cancel: threading.Event, confirm=None) -> None:
+    def run(self, user_text: str, emit, cancel: threading.Event, confirm=None,
+            images: list[str] | None = None) -> None:
         cfg = self.cfg
         conv = self.conv
+        images = [p for p in (images or []) if p]
 
         try:
             is_new = conv.user_turns() == 0
@@ -550,13 +598,32 @@ class AgentRunner:
                 tools.shell_description(cfg),
             )
 
-            conv.add_user(user_text)
+            conv.add_user(user_text, images)
             messages = [{"role": "system", "content": system}]
-            messages += conv.to_api_messages(int(cfg.get("history_limit", 24)))
-            messages.append({
-                "role": "user",
-                "content": prompts.build_user_message(user_text),
-            })
+            history = conv.to_api_messages(int(cfg.get("history_limit", 24)))
+            # 最后一条就是本次输入，下面要单独带图 append，别在这儿重复一遍
+            if history and conv.messages and history[-1].get("role") == "user":
+                history = history[:-1]
+            messages += history
+
+            head_text = prompts.build_user_message(user_text)
+            if images:
+                parts: list[dict] = [{"type": "text", "text": head_text}]
+                attached = 0
+                for rel in images:
+                    got = images_mod.api_parts(rel)
+                    if got:
+                        parts += got
+                        attached += 1
+                if attached:
+                    messages.append({"role": "user", "content": parts})
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": head_text + "\n（附带的图片读取失败，没能传给模型）",
+                    })
+            else:
+                messages.append({"role": "user", "content": head_text})
 
             api = config.api_of(cfg, "main_api")
             if not api.get("api_key"):
@@ -614,6 +681,24 @@ class AgentRunner:
                     emit({"type": "done"})
                     return
 
+                # 协议是一轮一个动作。模型偶尔会一口气甩好几个块，
+                # 以前只取第 0 个、其余静默丢掉，模型还当自己都做完了。
+                # 现在把「只执行了一个」写回上下文，让它下一轮重新发。
+                if len(actions) > 1:
+                    names = "、".join(str(a.get("tool") or "?") for a in actions)
+                    first = str(actions[0].get("tool") or "?").strip()
+                    note = (
+                        f"你这一轮给了 {len(actions)} 个 action 块（{names}），"
+                        f"但一次只能执行一个。这次只执行了「{first}」，"
+                        f"其余 {len(actions) - 1} 个没有执行。"
+                        f"如果还需要它们，下一轮一个一个重新发。"
+                    )
+                    conv.add_tool("notice", note)
+                    messages.append({"role": "user", "content": "（系统提示）" + note})
+                    emit({"type": "tool_start", "name": "提示",
+                          "detail": f"收到 {len(actions)} 个动作，只执行第 1 个"})
+                    emit({"type": "tool_result", "name": "提示", "text": note})
+
                 act = actions[0]
                 tool = (act.get("tool") or "").strip()
 
@@ -661,6 +746,7 @@ class AgentRunner:
                 head = TOOL_RESULT_PREFIX.format(name=tool or "tool") + "\n" + result
                 if image_path:
                     # 只留最新一张截图。旧图换成文字占位，否则请求体几轮就爆了。
+                    # 注意必须只动「工具结果」消息：用户自己发的图片不能删。
                     for i, m in enumerate(messages):
                         parts = m.get("content")
                         if not isinstance(parts, list):
@@ -669,6 +755,8 @@ class AgentRunner:
                             continue
                         txt = next((p.get("text", "") for p in parts
                                     if p.get("type") == "text"), "")
+                        if not txt.startswith("[工具 "):
+                            continue
                         messages[i] = {
                             "role": m.get("role", "user"),
                             "content": txt + "\n（旧截图已省略，需要时重新截一张）",

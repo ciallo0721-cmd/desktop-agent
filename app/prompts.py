@@ -22,6 +22,12 @@ from . import config
 NEW_CONV_NEW = "【是否为新对话】是。这是本次对话的第一句，历史上下文为空。"
 NEW_CONV_OLD = "【是否为新对话】否。这是同一段对话的延续，请接着上面的内容说，不要重复自我介绍。"
 
+IMAGE_NOTE = """【关于图片】
+用户可以直接发图片过来（截图、照片、示意图），图片会跟文字一起出现在这条消息里。
+- 看得到就直接描述你看到的东西，别假装看不到，也别让用户改用文字重述。
+- 图里的文字、报错、代码，照原样读，不要意译。
+- 只有历史里标了「这里原本有图片，已经省略」的地方是真的没有图，那部分不要瞎猜。"""
+
 HARDCODED_BOTTOM_LINE = """【底线】
 1. 你运行在用户自己的电脑上，一切动作都会真实发生。不确定就先观察，别猜。
 2. 删除、格式化、关机、改系统设置、上传隐私文件——这类不可逆操作，先问用户。
@@ -137,6 +143,7 @@ def build_system_prompt(
         "【角色与工作方式】\n" + (role or "（未设置）"),
         HARDCODED_BOTTOM_LINE,
         f"【当前环境】\n操作系统：Windows\n可用 Shell：{shell_desc}\n用户名：{cfg.get('user_name', '用户')}",
+        IMAGE_NOTE,
         TOOL_PROTOCOL.replace("{tools}", docs),
     ]
     return "\n\n".join(b for b in blocks if b and b.strip())

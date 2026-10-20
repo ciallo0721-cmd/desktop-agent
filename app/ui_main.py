@@ -11,12 +11,14 @@ import queue
 import threading
 import tkinter as tk
 import traceback
+from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox
 
 import customtkinter as ctk
+from PIL import Image
 
-from . import agent_core, config, memory
+from . import agent_core, config, images, memory
 from .ui_settings import SettingsWindow
 
 FONT = "Microsoft YaHei UI"
@@ -103,6 +105,10 @@ class ChatBubble(ctk.CTkFrame):
         self._text = ""
         self._timer = None
         self._fit_job = None
+        self.img_holder = None
+        self._photos: list = []      # 防 CTkImage 被 GC
+        self._img_h = 0
+        self._img_w = 0
         is_user = role == "user"
         bg = C_USER if is_user else C_AI
         self._font = tkfont.Font(family=FONT, size=13)
@@ -151,6 +157,64 @@ class ChatBubble(ctk.CTkFrame):
 
         bind_tree(self, "<Button-3>", self._popup)
 
+    # -- 图片 ----------------------------------------------------------
+    def add_images(self, paths) -> int:
+        """在文字上方插缩略图，返回成功加载的张数。"""
+        got = []
+        for rel in (paths or []):
+            im = images.open_for_ui(rel, 340)
+            if im is None:
+                continue
+            got.append((rel, im))
+        if not got:
+            return 0
+
+        if self.img_holder is None:
+            self.img_holder = ctk.CTkFrame(self.box, fg_color="transparent")
+            self.img_holder.pack(fill="x", padx=self.OUT_X,
+                                 pady=(self.OUT_Y + 2, 0), before=self.txt)
+
+        for rel, im in got:
+            ck = ctk.CTkImage(light_image=im, dark_image=im, size=im.size)
+            self._photos.append(ck)
+            lab = ctk.CTkLabel(self.img_holder, image=ck, text="",
+                               fg_color="transparent")
+            lab.pack(anchor="w", pady=(0, 4))
+            lab.bind("<Button-1>", lambda e, r=rel: self._open_viewer(r))
+            lab.configure(cursor="hand2")
+            self._img_h += im.size[1] + 4
+            self._img_w = max(self._img_w, im.size[0])
+
+        self._schedule_fit()
+        return len(got)
+
+    def _open_viewer(self, rel: str) -> None:
+        """点缩略图看大图。"""
+        p = images.resolve(rel)
+        if not p:
+            return
+        try:
+            im = Image.open(p)
+            im.load()
+        except Exception:
+            return
+        try:
+            sw = self.winfo_screenwidth() - 140
+            sh = self.winfo_screenheight() - 180
+            k = min(1.0, sw / im.width, sh / im.height)
+            if k < 1:
+                im = im.resize((max(1, int(im.width * k)),
+                                max(1, int(im.height * k))), Image.LANCZOS)
+            win = tk.Toplevel(self)
+            win.title(f"{p.name}  ·  {im.width}×{im.height}")
+            ck = ctk.CTkImage(light_image=im, dark_image=im, size=im.size)
+            lab = ctk.CTkLabel(win, image=ck, text="")
+            lab.image = ck
+            lab.pack()
+            win.bind("<Escape>", lambda e: win.destroy())
+        except Exception:
+            pass
+
     # -- 尺寸 ----------------------------------------------------------
     def _scroll_canvas(self):
         p = self.master
@@ -198,6 +262,8 @@ class ChatBubble(ctk.CTkFrame):
             need = max(px) if px else 0
             pad = 2 * (self.OUT_X + self.TXT_PADX)
             box_w = min(self.MAX_W, max(80, need + pad + 10))
+            if self._img_w:
+                box_w = max(box_w, min(self.MAX_W, self._img_w + 2 * self.OUT_X))
             inner = max(24, box_w - pad - 6)
 
             n = 0
@@ -205,7 +271,8 @@ class ChatBubble(ctk.CTkFrame):
                 n += 1 if w <= inner else (int(w) + int(inner) - 1) // int(inner)
             n = max(1, n)
 
-            box_h = n * (self._lh + 2) + 2 * (self.OUT_Y + self.TXT_PADY) + 8
+            box_h = (n * (self._lh + 2) + 2 * (self.OUT_Y + self.TXT_PADY) + 8
+                     + self._img_h)
             self.box.configure(width=int(box_w), height=int(box_h))
             self.box.update_idletasks()
 
@@ -216,7 +283,8 @@ class ChatBubble(ctk.CTkFrame):
                     real = real[0] if real else 0
                 real = int(real or 0) + 1
                 if real > 0:
-                    h2 = real * (self._lh + 2) + 2 * (self.OUT_Y + self.TXT_PADY) + 8
+                    h2 = (real * (self._lh + 2)
+                          + 2 * (self.OUT_Y + self.TXT_PADY) + 8 + self._img_h)
                     # 宁可多几像素留白，也不要裁掉文字
                     if h2 > box_h:
                         box_h = h2
@@ -526,6 +594,7 @@ class App(ctk.CTk):
         self._tool_card: ToolCard | None = None
         self._welcome = False
         self._last_ai_text = ""
+        self.pending_images: list[str] = []
         self._rounds_since_memory = 0
         self._mem_running = False
         self._closing = False
@@ -637,27 +706,47 @@ class App(ctk.CTk):
         bar.grid(row=2, column=0, sticky="ew")
         bar.grid_columnconfigure(0, weight=1)
 
+        # 待发图片条：有图才占位置
+        self.attach_bar = ctk.CTkFrame(
+            bar, fg_color="#F7F8FA", corner_radius=8,
+            border_width=1, border_color=C_BORDER,
+        )
+        self.attach_bar.grid(row=0, column=0, columnspan=3, sticky="ew",
+                             padx=12, pady=(8, 0))
+        self.attach_bar.grid_remove()
+        self.attach_inner = ctk.CTkFrame(self.attach_bar, fg_color="transparent")
+        self.attach_inner.pack(fill="x", padx=8, pady=6)
+
         self.input_box = ctk.CTkTextbox(
             bar, height=64, corner_radius=8, border_width=1,
             border_color=C_BORDER, font=ctk.CTkFont(family=FONT, size=13),
             wrap="word", fg_color="#FCFCFD",
         )
-        self.input_box.grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=(8, 4))
+        self.input_box.grid(row=1, column=0, sticky="ew", padx=(12, 8), pady=(8, 4))
         self.input_box.bind("<Return>", self._on_enter)
         self.input_box.bind("<Shift-Return>", lambda e: None)
+        self._bind_paste()
+
+        self.img_btn = ctk.CTkButton(
+            bar, text="图片", width=54, height=64, corner_radius=8,
+            fg_color="#E6E9EE", hover_color="#D8DCE3", text_color="#33383F",
+            font=ctk.CTkFont(family=FONT, size=11),
+            command=self._pick_images,
+        )
+        self.img_btn.grid(row=1, column=1, padx=(0, 8), pady=(8, 4))
 
         self.send_btn = ctk.CTkButton(
             bar, text="发送", width=76, height=64, corner_radius=8,
             font=ctk.CTkFont(family=FONT, size=13, weight="bold"),
             command=self._on_send_click,
         )
-        self.send_btn.grid(row=0, column=1, padx=(0, 12), pady=(8, 4))
+        self.send_btn.grid(row=1, column=2, padx=(0, 12), pady=(8, 4))
 
         self.status_label = ctk.CTkLabel(
-            bar, text="Enter 发送 · Shift+Enter 换行", anchor="w",
+            bar, text="Enter 发送 · Shift+Enter 换行 · Ctrl+V 粘贴截图", anchor="w",
             text_color=C_MUTED, font=ctk.CTkFont(family=FONT, size=10),
         )
-        self.status_label.grid(row=1, column=0, columnspan=2, sticky="w", padx=16,
+        self.status_label.grid(row=2, column=0, columnspan=3, sticky="w", padx=16,
                                pady=(0, 8))
 
         self._update_model_label()
@@ -743,6 +832,7 @@ class App(ctk.CTk):
             self.cancel.set()
         self.current = conv
         self._rounds_since_memory = 0
+        self._reset_attachments()
         self._render_conversation()
         self._refresh_conv_list()
 
@@ -751,9 +841,20 @@ class App(ctk.CTk):
             self.cancel.set()
         self.current = agent_core.Conversation()
         self._rounds_since_memory = 0
+        self._reset_attachments()
         self._render_conversation()
         self._refresh_conv_list()
         self.input_box.focus_set()
+
+    def _reset_attachments(self) -> None:
+        """换对话时把待发图片扔掉，别飘到别的对话里。"""
+        if not self.pending_images:
+            return
+        self.pending_images.clear()
+        try:
+            self._render_attach()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 渲染
@@ -798,11 +899,14 @@ class App(ctk.CTk):
             text = m.get("content", "")
             if role == "assistant":
                 text = agent_core.strip_actions(text)
-            if not text.strip():
+            pics = m.get("images") or []
+            if not text.strip() and not pics:
                 continue
             b = ChatBubble(self.chat, role)
             b.pack(fill="x")
             b.set_text(text)
+            if pics:
+                b.add_images(pics)
 
         self._scroll_to_bottom()
 
@@ -835,11 +939,13 @@ class App(ctk.CTk):
         for w in self.chat.winfo_children():
             w.destroy()
 
-    def _add_bubble(self, role: str, text: str) -> ChatBubble:
+    def _add_bubble(self, role: str, text: str, pics=None) -> ChatBubble:
         self._drop_welcome()
         b = ChatBubble(self.chat, role)
         b.pack(fill="x")
         b.set_text(text)
+        if pics:
+            b.add_images(pics)
         if role == "assistant":
             self._last_ai_text = text
         self._scroll_to_bottom()
@@ -872,6 +978,142 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------
     # 发送
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 发图片
+    # ------------------------------------------------------------------
+    def _pick_images(self) -> None:
+        from tkinter import filedialog
+
+        paths = filedialog.askopenfilenames(
+            parent=self, title="选图片，可以多选",
+            filetypes=[
+                ("图片", "*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        for p in paths or ():
+            self._attach_path(p)
+
+    def _attach_path(self, src) -> None:
+        """压缩落盘放后台做：手机直出的大图在主线程 resize 会卡住窗口。"""
+        if not self.current:
+            return
+        cid = self.current.id
+
+        def work() -> None:
+            try:
+                rel = images.save(src, cid)
+            except images.ImageError as e:
+                msg = str(e)
+                self._post(lambda: self._status(f"没加上：{msg}"))
+                return
+            except Exception as e:
+                msg = f"{type(e).__name__}: {e}"
+                self._post(lambda: self._status(f"没加上：{msg}"))
+                return
+            self._post(lambda: self._add_pending(rel))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _post(self, fn) -> None:
+        """从后台线程回主线程。窗口已经关掉时 after 会抛，别让线程带毒退出。"""
+        try:
+            self.after(0, fn)
+        except (RuntimeError, tk.TclError):
+            pass
+
+    def _add_pending(self, rel: str) -> None:
+        if rel not in self.pending_images:
+            self.pending_images.append(rel)
+        self._render_attach()
+        self._status(f"已附上 {len(self.pending_images)} 张图片，敲回车一起发出去")
+
+    def _render_attach(self) -> None:
+        for w in self.attach_inner.winfo_children():
+            w.destroy()
+        if not self.pending_images:
+            self.attach_bar.grid_remove()
+            return
+        self.attach_bar.grid()
+        for rel in list(self.pending_images):
+            card = ctk.CTkFrame(self.attach_inner, fg_color="#FFFFFF",
+                                corner_radius=6, border_width=1,
+                                border_color=C_BORDER)
+            card.pack(side="left", padx=(0, 8))
+
+            im = images.open_for_ui(rel, 96)
+            if im is not None:
+                ck = ctk.CTkImage(light_image=im, dark_image=im, size=im.size)
+                lab = ctk.CTkLabel(card, image=ck, text="")
+                lab.image = ck
+                lab.pack(padx=5, pady=(5, 0))
+            else:
+                ctk.CTkLabel(
+                    card, text="读不出", width=56,
+                    font=ctk.CTkFont(family=FONT, size=10),
+                    text_color="#B0442F",
+                ).pack(padx=8, pady=14)
+
+            ctk.CTkButton(
+                card, text="×", width=18, height=16, corner_radius=9,
+                fg_color="transparent", hover_color="#F3DCDC",
+                text_color="#A05252", font=ctk.CTkFont(size=12),
+                command=lambda r=rel: self._drop_pending(r),
+            ).pack(pady=(0, 4))
+
+    def _drop_pending(self, rel: str) -> None:
+        try:
+            self.pending_images.remove(rel)
+        except ValueError:
+            pass
+        self._render_attach()
+        if not self.pending_images:
+            self._status("Enter 发送 · Shift+Enter 换行 · Ctrl+V 粘贴截图")
+        else:
+            self._status(f"已附上 {len(self.pending_images)} 张图片")
+
+    def _bind_paste(self) -> None:
+        """把 Ctrl+V 抢到 Tk 默认粘贴之前。
+
+        CTkTextbox.bind() 是 add=True，绑定排在类绑定之后 —— 那样文字已经
+        粘进去了，再判断就晚了。所以往 bindtags 最前面插一个自己的 tag。
+        """
+        try:
+            tb = getattr(self.input_box, "_textbox", None)
+            if tb is None:
+                return
+            tags = tuple(tb.bindtags())
+            if "AgentPaste" in tags:
+                return
+            tb.bindtags(("AgentPaste",) + tags)
+            for seq in ("<Control-v>", "<Control-V>"):
+                tb.bind_class("AgentPaste", seq, self._on_paste)
+        except Exception:
+            # 抢不到就退回普通绑定，至少按钮和右键还能用
+            try:
+                self.input_box.bind("<Control-v>", self._on_paste)
+            except Exception:
+                pass
+
+    def _on_paste(self, event):
+        """剪贴板里是图就收下；是文字就交给 Tk 自己粘。"""
+        try:
+            from PIL import ImageGrab
+
+            data = ImageGrab.grabclipboard()
+        except Exception:
+            return None
+
+        if isinstance(data, Image.Image):
+            self._attach_path(data)
+            return "break"
+        if isinstance(data, list) and data:
+            first = Path(str(data[0]))
+            if first.suffix.lower() in images.SUPPORTED and first.is_file():
+                self._attach_path(first)
+                return "break"
+        return None
+
     def _on_enter(self, event):
         if event.state & 0x0001:   # Shift → 换行
             return None
@@ -889,7 +1131,8 @@ class App(ctk.CTk):
         if self.busy or not self.current:
             return
         text = self.input_box.get("1.0", "end").strip()
-        if not text:
+        pics = list(self.pending_images)
+        if not text and not pics:
             return
         if not config.is_configured(self.cfg):
             messagebox.showwarning("没配 API", "先去设置里填主 API 的 Key。", parent=self)
@@ -897,7 +1140,12 @@ class App(ctk.CTk):
             return
 
         self.input_box.delete("1.0", "end")
-        self._add_bubble("user", text)
+        self.pending_images.clear()
+        self._render_attach()
+
+        b = self._add_bubble("user", text)
+        if pics:
+            b.add_images(pics)
 
         self.busy = True
         self.cancel = threading.Event()
@@ -919,6 +1167,7 @@ class App(ctk.CTk):
         threading.Thread(
             target=runner.run,
             args=(text, emit, self.cancel, self._ask_confirm),
+            kwargs={"images": pics},
             daemon=True,
         ).start()
 

@@ -102,7 +102,7 @@ class SettingsWindow(ctk.CTkToplevel):
                      anchor="w", font=ctk.CTkFont(size=11)).pack(fill="x", padx=8)
 
         self.sw_sandbox = self._switch(
-            scroll, "沙箱模式（限制工作目录 + 拦截高危命令）",
+            scroll, "沙箱模式（命令工作目录锁在 workspace/）",
             bool(cfg.get("sandbox", True)),
         )
         self.sw_screen = self._switch(

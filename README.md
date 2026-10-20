@@ -23,9 +23,68 @@
 
 ```
 双击 first.bat      # 第一次：问 API、装依赖、建 venv、启动
-双击 start.bat      # 之后：直接进界面
+双击 start.bat      # 之后：直接进 GUI
 start.bat -debug    # 带控制台，看报错
 ```
+
+## 发图片
+
+用户可以直接把图片发给 agent，模型会真的看到它（不是 OCR 转文字再传话）。
+
+| 前端 | 怎么发 |
+|---|---|
+| **GUI** | 点「图片」按钮选文件（可多选）；或 `Ctrl+V` 直接粘截图；输入框上方会出现待发缩略图，点 × 撤掉 |
+| **CLI** | `/img C:\path\pic.png` 附加；`/img` 单独敲 = 从剪贴板取；`/img -` 清空 |
+| **TUI** | `Ctrl+G` 收剪贴板里的图；或输入 `/img C:\path\pic.png` |
+| **Web** | 点「图片」选文件；或在输入框里直接 `Ctrl+V` 粘截图 |
+
+带图消息可以只有图、不写字。
+
+落盘在 `data/images/<对话id>/`，长边超过 2048 会等比缩小，带透明的存 PNG、其余存 JPEG(q88)，
+单张原图上限 24MB。对话里只存相对路径，整个项目文件夹可以随便搬。
+历史里只有**最近一条**带图消息会真的把原图发出去，更早的降级成「这里原本有图片，已经省略」——
+否则聊上几轮，每次请求体都是十几 MB。
+
+## 四种前端
+
+同一套对话、同一套工具，只是壳不一样。
+
+| 模式 | 启动 | 说明 |
+|---|---|---|
+| **GUI** | `start.bat` 或 `python agent.py` | customtkinter 窗口，默认 |
+| **CLI** | `start.bat cli` 或 `python agent.py cli` | 命令行 REPL，流式打字机 |
+| **TUI** | `start.bat tui` 或 `python agent.py tui` | 命令行里的窗口，ASCII 边框 + 方向键 |
+| **Web** | `start.bat web` 或 `python agent.py web` | 浏览器开 http://127.0.0.1:16800 |
+
+### CLI 常用命令
+
+```
+/help  /new  /list  /use N  /del N  /stop  /mode bash|screen|both  /img 路径  /clear  /exit
+```
+
+Ctrl+C 打断当前回复（不会退出程序）。
+
+### TUI 按键
+
+```
+↑ ↓          在会话列表里选
+← →          切换焦点（列表 / 输入框）
+Enter        发送
+PgUp PgDn    聊天区翻页
+Ctrl+N       新对话
+Ctrl+C       复制最后一条 AI 回复
+Ctrl+V       粘贴（终端自己处理）
+Ctrl+G       把剪贴板里的图片收进待发列表
+Ctrl+End     停止正在跑的这一轮（Ctrl+X 也行）
+Ctrl+Q       退出（连按两次）
+```
+
+TUI 只用 ANSI 转义 + `msvcrt`，不需要装 `windows-curses`。
+
+### Web
+
+只用标准库 `http.server`，**不依赖 Flask**。SSE 长连接推流，
+只监听 `127.0.0.1`，不对外网开放。会话列表、切换、新建、高危确认都能用。
 
 `first.bat` 会依次问：
 
@@ -39,7 +98,7 @@ start.bat -debug    # 带控制台，看报错
 ## 目录
 
 ```
-agent.py            入口
+agent.py            入口（认 cli / tui / web 参数）
 setup_env.py        首装向导 + 环境自检
 first.bat           首装 / 重配
 start.bat           日常启动
@@ -50,9 +109,14 @@ app/
   tools.py          bash、截屏、鼠标键盘、剪贴板
   websearch.py      联网搜索与网页抓取
   memory.py         长期记忆读写
+  images.py         用户发的图片：校验、缩放、落盘、转 data URI
   agent_core.py     动作解析、工具分发、多步循环
-  ui_main.py        主窗口
-  ui_settings.py    设置窗口
+  session.py        四种前端共用的会话服务
+  ui_main.py        GUI 主窗口
+  ui_settings.py    GUI 设置窗口
+  ui_cli.py         CLI 模式
+  ui_tui.py         TUI 模式
+  ui_web.py         Web 模式（标准库 HTTP + SSE）
 prompt/
   systemprompt.md   系统提示（可改）
   roleprompt.md     角色与工作方式（可改）
