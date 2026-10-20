@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import config
+from . import config, skills
 
 # --------------------------------------------------------------------------
 # 硬编码段落
@@ -80,11 +80,13 @@ TOOL_DOCS = {
     "wait": '{"tool": "wait", "seconds": 2}  —— 等一会儿，用于等待窗口加载。',
     "ask": '{"tool": "ask", "question": "要问用户的话"}  —— 暂停并向用户提问，用户回答后继续。',
     "done": '{"tool": "done", "summary": "一句话总结完成了什么"}  —— 任务结束。',
+    "skill": '{"tool": "skill", "name": "技能id"}  —— 读入一个技能的完整说明书。读某个技能的附件用 {"tool": "skill", "name": "技能id", "file": "references/xx.md"}。',
+    "skill_run": '{"tool": "skill_run", "name": "技能id", "cmd": "python scripts/xxx.py 参数"}  —— 在技能自己的目录里执行命令，用于跑技能自带的脚本。',
 }
 
 
 def tool_docs(mode: str, screen_ok: bool, screen_control: bool,
-              web: bool = True) -> str:
+              web: bool = True, use_skills: bool = False) -> str:
     """根据模式决定给 AI 看哪些工具。mode: bash / screen / both"""
     names: list[str] = []
     use_bash = mode in ("bash", "both")
@@ -99,6 +101,8 @@ def tool_docs(mode: str, screen_ok: bool, screen_control: bool,
                   "copy_region", "clipboard"]
     if web:
         names += ["web_search", "web_fetch"]
+    if use_skills:
+        names += ["skill", "skill_run"]
     names += ["wait", "ask", "done"]
     return "\n".join(TOOL_DOCS[n] for n in names if n in TOOL_DOCS)
 
@@ -128,11 +132,13 @@ def build_system_prompt(
     persona = read_prompt_file(cfg, "persona")
     role = read_prompt_file(cfg, "role")
 
+    skills_text = skills.catalog(cfg)
     docs = tool_docs(
         cfg.get("agent_mode", "both"),
         screen_ok,
         bool(cfg.get("screen_control", True)),
         bool(cfg.get("web_search", True)),
+        use_skills=bool(skills_text),
     )
 
     blocks = [
@@ -144,6 +150,7 @@ def build_system_prompt(
         HARDCODED_BOTTOM_LINE,
         f"【当前环境】\n操作系统：Windows\n可用 Shell：{shell_desc}\n用户名：{cfg.get('user_name', '用户')}",
         IMAGE_NOTE,
+        skills_text,
         TOOL_PROTOCOL.replace("{tools}", docs),
     ]
     return "\n\n".join(b for b in blocks if b and b.strip())

@@ -141,12 +141,16 @@ def _kill_tree(pid: int) -> None:
             pass
 
 
-def run_bash(cfg: dict, cmd: str, confirm=None, cancel=None) -> str:
+def run_bash(cfg: dict, cmd: str, confirm=None, cancel=None,
+             workdir: str | None = None, timeout: int | None = None) -> str:
     """执行命令。
 
     confirm: callable(cmd, reason) -> bool。命中高危规则时调用它问用户。
              传 None 表示没有交互环境，直接拒绝。
     cancel:  threading.Event。置位后立刻杀掉整棵进程树并返回。
+    workdir: 指定工作目录（skill_run 用来把 cwd 钉在技能目录里）。
+             不传就按 sandbox 走 workspace/ 或项目根。
+    timeout: 覆盖 cfg 里的 bash_timeout。
 
     输出走临时文件而不是管道 —— 因为 GUI 程序（start xxx.exe）会继承管道
     句柄并且不退出，用 capture_output 会永远等不到 EOF，界面就卡在"执行中"。
@@ -174,8 +178,16 @@ def run_bash(cfg: dict, cmd: str, confirm=None, cancel=None) -> str:
             )
 
     bash = config.find_bash(cfg)
-    cwd = str(config.WORK_DIR if sandbox else config.BASE_DIR)
-    config.WORK_DIR.mkdir(parents=True, exist_ok=True)
+    if workdir:
+        cwd_path = Path(workdir)
+        try:
+            cwd_path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            cwd_path = config.WORK_DIR
+    else:
+        cwd_path = config.WORK_DIR if sandbox else config.BASE_DIR
+    cwd = str(cwd_path)
+    cwd_path.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
     env["LANG"] = "C.UTF-8"
@@ -189,7 +201,7 @@ def run_bash(cfg: dict, cmd: str, confirm=None, cancel=None) -> str:
         argv = ["cmd.exe", "/c", cmd]
 
     shell_flag = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    timeout = int(cfg.get("bash_timeout", 120))
+    timeout = int(timeout or cfg.get("bash_timeout", 120))
 
     tmp_dir = config.DATA_DIR / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)

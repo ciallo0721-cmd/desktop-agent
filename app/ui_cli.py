@@ -14,7 +14,7 @@ import os
 import sys
 import time
 
-from . import agent_core, config, images
+from . import agent_core, config, images, skills
 from .session import Session
 
 # ---------------------------------------------------------------- 终端控制
@@ -117,6 +117,7 @@ HELP = """\
 /del N           删掉第 N 个对话（移到 data/trash）
 /stop            停掉正在跑的这一轮（等于 Ctrl+C）
 /mode [模式]     查看或切换 bash | screen | both
+/skill           列出技能；/skill on <id> 开，/skill off <id> 关，/skill cat <id> 看正文
 /img [路径]      附加一张图；不带路径 = 从剪贴板取；/img - 清空
 /clear           清屏
 /exit            退出
@@ -139,6 +140,45 @@ def _cmd_mode(s: Session, arg: str) -> None:
     cfg_all["agent_mode"] = arg
     config.save_config(cfg_all)
     print(f"已切到 {_color('cya', arg)}")
+
+
+def _cmd_skill(s: Session, arg: str) -> None:
+    skills.ensure_scaffold()
+    parts = arg.split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    target = parts[1].strip() if len(parts) > 1 else ""
+
+    if sub in ("on", "off"):
+        if not target:
+            print(_color("red", "用法：/skill on <id>"))
+            return
+        sk = skills.get_skill(target, s.cfg)
+        if not sk:
+            print(_color("red", f"没有这个技能：{target}"))
+            return
+        skills.set_enabled(s.cfg, sk.sid, sub == "on")
+        print(_color("gry", f"{sk.sid} 已{'启用' if sub == 'on' else '关闭'}"))
+        return
+
+    if sub in ("cat", "show", "read"):
+        if not target:
+            print(_color("red", "用法：/skill cat <id>"))
+            return
+        ok, text = skills.load_text(s.cfg, target)
+        print(text if ok else _color("red", text))
+        return
+
+    items = skills.list_skills(s.cfg, fresh=True)
+    if not items:
+        print(_color("gry", f"还没有技能。目录：{config.SKILL_DIR}"))
+        return
+    master = "开" if s.cfg.get("skills_enabled", True) else "关"
+    print(_color("b", f"技能（总开关 {master}）"))
+    for sk in items:
+        flag = _color("grn", "开") if sk.enabled else _color("gry", "关")
+        desc = " ".join((sk.description or "").split())[:52]
+        print(f"  [{flag}] {_color('cya', sk.sid):<22} {desc}")
+    print(_color("gry", f"  目录：{config.SKILL_DIR}  ·  /skill on|off|cat <id>"))
 
 
 def _cmd_list(s: Session) -> None:
@@ -241,6 +281,8 @@ def _handle(s: Session, line: str, printer: _Printer, pending: list) -> bool:
         print(_color("gry", "已请求停止"))
     elif cmd == "/mode":
         _cmd_mode(s, arg)
+    elif cmd == "/skill":
+        _cmd_skill(s, arg)
     elif cmd == "/img":
         _cmd_img(s, arg, pending)
     elif cmd == "/clear":

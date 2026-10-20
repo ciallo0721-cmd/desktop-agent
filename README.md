@@ -17,6 +17,7 @@
 | `copy_region` / `clipboard` | 区域截图入剪贴板、读写剪贴板文字 |
 | `web_search` | 联网搜索（默认抓 360 / Bing，填 Key 可走 Tavily / Serper） |
 | `web_fetch` | 打开网页抓正文纯文本 |
+| `skill` / `skill_run` | 加载技能说明书、在技能目录里跑技能脚本 |
 | `ask` / `wait` / `done` | 反问用户、等待、收尾 |
 
 ## 快速开始
@@ -45,6 +46,53 @@ start.bat -debug    # 带控制台，看报错
 历史里只有**最近一条**带图消息会真的把原图发出去，更早的降级成「这里原本有图片，已经省略」——
 否则聊上几轮，每次请求体都是十几 MB。
 
+## Skill 技能包
+
+预置「怎么做某件事」的说明书，模型用到才读，不占用日常上下文。
+
+```
+skills/
+  file-tidy/              一个技能 = 一个文件夹
+    SKILL.md              必需：元信息 + 正文
+    scripts/tidy.py       可选：技能自带脚本，用 skill_run 跑
+    references/by-type.md 可选：附件，正文里点名了才按需读
+```
+
+`SKILL.md` 长这样：
+
+```
+---
+name: 文件整理
+description: 一句话说清干什么 + 什么时候该用（这句进系统提示词）
+when: 更具体的触发条件，可留空
+enabled: true
+---
+正文：分步骤写怎么做，命令原样贴。
+```
+
+工作方式（渐进式披露）：
+
+1. 系统提示词里只放 `id · 名字 · 一句描述`，**正文不进**。
+2. 模型判断命中 → `{"tool": "skill", "name": "file-tidy"}` 把正文读进来。
+3. 附件 → `{"tool": "skill", "name": "file-tidy", "file": "references/by-type.md"}`。
+4. 跑脚本 → `{"tool": "skill_run", "name": "file-tidy", "cmd": "python scripts/tidy.py workspace"}`，
+   cwd 自动钉在技能文件夹里，相对路径都相对它。
+
+管理入口：
+
+| 前端 | 在哪 |
+|---|---|
+| **GUI** | 左下角「🧩 技能」：逐个开关、新建模板、直接打开 SKILL.md |
+| **Web** | 顶栏「技能」面板：勾选开关 |
+| **CLI** | `/skill` 列表，`/skill on\|off <id>`，`/skill cat <id>` 看正文 |
+| **配置文件** | `skills_enabled`（总开关）、`skills_disabled`（关闭名单） |
+
+`skill_run` 和 `bash` 走同一套高危检测，`rm -r` / `format` / `shutdown` 照样弹窗确认。
+技能只是说明书，**不是权限升级**。
+
+仓里自带一个 `file-tidy` 当模板：默认 dry-run 只打印计划，加 `--apply` 才真挪文件。
+自己加技能就照抄它的目录结构，`skills/README.md` 里有完整规矩。
+
 ## 四种前端
 
 同一套对话、同一套工具，只是壳不一样。
@@ -59,7 +107,8 @@ start.bat -debug    # 带控制台，看报错
 ### CLI 常用命令
 
 ```
-/help  /new  /list  /use N  /del N  /stop  /mode bash|screen|both  /img 路径  /clear  /exit
+/help  /new  /list  /use N  /del N  /stop  /mode bash|screen|both  /img 路径
+/skill  /skill on|off|cat <id>  /clear  /exit
 ```
 
 Ctrl+C 打断当前回复（不会退出程序）。
@@ -75,6 +124,7 @@ Ctrl+N       新对话
 Ctrl+C       复制最后一条 AI 回复
 Ctrl+V       粘贴（终端自己处理）
 Ctrl+G       把剪贴板里的图片收进待发列表
+/skill       列出技能；/skill on|off <id> 开关，/skill cat <id> 看正文
 Ctrl+End     停止正在跑的这一轮（Ctrl+X 也行）
 Ctrl+Q       退出（连按两次）
 ```
@@ -110,10 +160,12 @@ app/
   websearch.py      联网搜索与网页抓取
   memory.py         长期记忆读写
   images.py         用户发的图片：校验、缩放、落盘、转 data URI
+  skills.py         技能扫描、frontmatter 解析、按需加载、附件越界拦截
   agent_core.py     动作解析、工具分发、多步循环
   session.py        四种前端共用的会话服务
   ui_main.py        GUI 主窗口
   ui_settings.py    GUI 设置窗口
+  ui_skills.py      GUI 技能管理窗口
   ui_cli.py         CLI 模式
   ui_tui.py         TUI 模式
   ui_web.py         Web 模式（标准库 HTTP + SSE）
@@ -122,6 +174,7 @@ prompt/
   roleprompt.md     角色与工作方式（可改）
   memory.md         长期记忆（自动维护，也可手改）
   人设.md           人格（可改）
+skills/             技能包（见上文，自带 file-tidy 示例）
 data/               配置与对话存档（不进 git）
 workspace/          agent 的默认工作目录
 ```
@@ -130,7 +183,8 @@ workspace/          agent 的默认工作目录
 
 ```
 systemprompt.md → memory.md → 是否新对话 → 人设.md → roleprompt.md
-→ 底线（硬编码）→ 当前环境 → 工具协议（硬编码）
+→ 底线（硬编码）→ 当前环境 → 图片说明 → 技能清单（有启用的技能才出现）
+→ 工具协议（硬编码）
 ```
 
 用户消息统一包成 `userinput:内容`。
@@ -164,6 +218,14 @@ systemprompt.md → memory.md → 是否新对话 → 人设.md → roleprompt.m
 ## 配置字段
 
 `data/config.json`，也可在界面「设置」里改。参考 `data/config.example.json`。
+
+和技能相关的三个：
+
+| 字段 | 默认 | 作用 |
+|---|---|---|
+| `skills_enabled` | `true` | 总开关，关掉后技能清单不进提示词，`skill` 工具也拒绝 |
+| `skills_disabled` | `[]` | 被关掉的技能 id，覆盖 SKILL.md 里的 `enabled` |
+| `skill_timeout` | `120` | `skill_run` 单次执行超时（秒） |
 
 ## License
 

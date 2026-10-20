@@ -143,6 +143,20 @@ class SettingsWindow(ctk.CTkToplevel):
                 command=lambda k=key: self._open_prompt(k),
             ).pack(side="left", padx=3)
 
+        # ---------- Skill ----------
+        self._section(scroll, "Skill 技能")
+        self.sw_skills = self._switch(
+            scroll, "启用技能（skills/ 里的技能包会写进系统提示词）",
+            bool(cfg.get("skills_enabled", True)),
+        )
+        ctk.CTkLabel(
+            scroll,
+            text=f"技能目录：{config.SKILL_DIR}\n"
+                 "主界面左下角「技能」可以逐个开关、新建模板。",
+            text_color="#888888", anchor="w", justify="left",
+            font=ctk.CTkFont(size=11),
+        ).pack(fill="x", padx=8)
+
         # ---------- 底部按钮 ----------
         bottom = ctk.CTkFrame(self, fg_color="transparent")
         bottom.pack(side="bottom", fill="x", padx=10, pady=8)
@@ -215,6 +229,7 @@ class SettingsWindow(ctk.CTkToplevel):
         cfg["screen_control"] = bool(self.sw_screen.var.get())
         cfg["vision_passthrough"] = bool(self.sw_passthrough.var.get())
         cfg["web_search"] = bool(self.sw_web.var.get())
+        cfg["skills_enabled"] = bool(self.sw_skills.var.get())
         cfg["autostart"] = bool(self.sw_auto.var.get())
         try:
             cfg["max_steps"] = max(1, int(self.v_steps.get()))

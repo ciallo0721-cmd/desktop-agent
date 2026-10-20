@@ -360,6 +360,9 @@ def wizard() -> dict:
         "temperature": 0.7,
         "memory_every": 6,
         "appearance": "light",
+        "skills_enabled": True,
+        "skills_disabled": [],
+        "skill_timeout": 120,
         "prompts": {
             "system": "prompt/systemprompt.md",
             "role": "prompt/roleprompt.md",
@@ -474,6 +477,7 @@ def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (BASE_DIR / "workspace").mkdir(exist_ok=True)
     (BASE_DIR / "prompt").mkdir(exist_ok=True)
+    (BASE_DIR / "skills").mkdir(exist_ok=True)
 
     # 1. 配置
     cfg: dict | None = None

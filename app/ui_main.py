@@ -20,6 +20,7 @@ from PIL import Image
 
 from . import agent_core, config, images, memory
 from .ui_settings import SettingsWindow
+from .ui_skills import SkillWindow
 
 FONT = "Microsoft YaHei UI"
 FONT_MONO = "Consolas"
@@ -660,6 +661,13 @@ class App(ctk.CTk):
             side, fg_color="transparent", corner_radius=0,
         )
         self.conv_list.pack(fill="both", expand=True, padx=6, pady=6)
+
+        ctk.CTkButton(
+            side, text="🧩   技能", height=34, corner_radius=8,
+            fg_color="#E6E9EE", hover_color="#D8DCE3", text_color="#33383F",
+            font=ctk.CTkFont(family=FONT, size=12),
+            command=self._open_skills,
+        ).pack(fill="x", padx=10, pady=(0, 6))
 
         ctk.CTkButton(
             side, text="⚙   设置", height=34, corner_radius=8,
@@ -1354,6 +1362,13 @@ class App(ctk.CTk):
             self._update_model_label()
 
         SettingsWindow(self, self.cfg, on_saved=saved)
+
+    def _open_skills(self) -> None:
+        def changed(new_cfg: dict) -> None:
+            self.cfg = new_cfg
+
+        win = SkillWindow(self, self.cfg, on_changed=changed)
+        win.after(200, win.lift)
 
     # ------------------------------------------------------------------
     # 关闭：先把记忆存下来再退出

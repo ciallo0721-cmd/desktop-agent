@@ -13,7 +13,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import agent_core, config, images
+from . import agent_core, config, images, skills
 from .session import Session
 
 HOST = "127.0.0.1"
@@ -146,6 +146,20 @@ def make_handler(hub: SessionHub, sess: Session):
                 self._stream()
                 return
 
+            if path == "/api/skills":
+                self._json({
+                    "enabled": bool(sess.cfg.get("skills_enabled", True)),
+                    "dir": str(config.SKILL_DIR),
+                    "items": [{
+                        "id": s.sid,
+                        "name": s.name,
+                        "desc": " ".join((s.description or "").split()),
+                        "enabled": s.enabled,
+                        "files": s.attachments()[:6],
+                    } for s in skills.list_skills(sess.cfg, fresh=True)],
+                })
+                return
+
             if path == "/img":
                 self._image()
                 return
@@ -226,6 +240,23 @@ def make_handler(hub: SessionHub, sess: Session):
                                     "messages": _visible(sess.conv)})
                         return
                 self._json({"ok": False, "err": "没有这个对话"})
+                return
+
+            if path == "/api/skills/toggle":
+                if "master" in data:
+                    sess.cfg["skills_enabled"] = bool(data.get("master"))
+                    try:
+                        config.save_config(sess.cfg)
+                    except OSError:
+                        pass
+                    self._json({"ok": True})
+                    return
+                sid = str(data.get("id") or "").strip()
+                if not sid:
+                    self._json({"ok": False, "err": "缺 id"})
+                    return
+                skills.set_enabled(sess.cfg, sid, bool(data.get("enabled")))
+                self._json({"ok": True})
                 return
 
             self._json({"ok": False, "err": "not found"}, 404)
@@ -459,6 +490,35 @@ PAGE = r"""<!DOCTYPE html>
   .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
          background: #b9c0c9; margin-right: 5px; }
   .dot.live { background: #35c46a; }
+  /* ---- 技能面板 ---- */
+  #skillPanel {
+    position: fixed; top: 52px; right: 16px; width: 372px; max-height: 76vh;
+    background: #fff; border: 1px solid #e3e6eb; border-radius: 10px;
+    box-shadow: 0 12px 34px rgba(20,26,36,.16); display: none;
+    flex-direction: column; z-index: 40; overflow: hidden;
+  }
+  #skillPanel.on { display: flex; }
+  #skHead {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid #eef0f3; font-size: 13px; font-weight: 600;
+  }
+  #skHead .sp { flex: 1; }
+  #skHead label { font-size: 11.5px; font-weight: 400; color: #5f6670;
+                  display: flex; align-items: center; gap: 4px; }
+  #skList { overflow-y: auto; padding: 8px; }
+  .sk {
+    border: 1px solid #eef0f3; border-radius: 8px; padding: 8px 10px;
+    margin-bottom: 7px;
+  }
+  .sk .h { display: flex; align-items: center; gap: 6px; }
+  .sk .h b { font-size: 12.5px; }
+  .sk .h i { font-size: 10.5px; color: #9aa1ab; font-style: normal; }
+  .sk .h input { margin-left: auto; }
+  .sk p { margin: 4px 0 0; font-size: 11.5px; color: #5f6670; line-height: 1.5; }
+  .sk small { display: block; margin-top: 4px; color: #a8aeb7; font-size: 10.5px;
+              word-break: break-all; }
+  #skFoot { padding: 8px 12px; border-top: 1px solid #eef0f3; font-size: 11px;
+            color: #9aa1ab; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -475,6 +535,7 @@ PAGE = r"""<!DOCTYPE html>
     <span id="status">连接中…</span>
     <span class="sp"></span>
     <span id="model"></span>
+    <button id="skillBtn">技能</button>
   </div>
   <div id="chat"></div>
   <div id="bar">
@@ -487,6 +548,16 @@ PAGE = r"""<!DOCTYPE html>
     </div>
     <div id="hint">Ctrl+Enter 也可以发送 · 正在跑的时候按钮会变成「停止」</div>
   </div>
+</div>
+
+<div id="skillPanel">
+  <div id="skHead">
+    <span>技能 Skill</span>
+    <span class="sp"></span>
+    <label><input type="checkbox" id="skMaster"> 总开关</label>
+  </div>
+  <div id="skList"></div>
+  <div id="skFoot"></div>
 </div>
 
 <div id="overlay">
@@ -692,6 +763,81 @@ $('#newBtn').onclick = async () => {
   renderAttach();
   renderMessages([]);
   loadConvs();
+};
+
+// ---------------- 技能 ----------------
+const skEl = $('#skillPanel');
+
+async function loadSkills() {
+  let d;
+  try {
+    d = await (await fetch('/api/skills')).json();
+  } catch (e) {
+    return;
+  }
+  $('#skMaster').checked = !!d.enabled;
+  $('#skFoot').textContent = d.dir || '';
+  const box = $('#skList');
+  box.innerHTML = '';
+
+  if (!d.items || !d.items.length) {
+    const p = document.createElement('p');
+    p.style.cssText = 'font-size:12px;color:#9aa1ab;padding:6px;margin:0';
+    p.textContent = '还没有技能。在 skills/ 里建一个文件夹，放 SKILL.md。';
+    box.appendChild(p);
+    return;
+  }
+
+  for (const s of d.items) {
+    const card = document.createElement('div');
+    card.className = 'sk';
+
+    const h = document.createElement('div');
+    h.className = 'h';
+    const b = document.createElement('b');
+    b.textContent = s.name || s.id;
+    const i = document.createElement('i');
+    i.textContent = s.id;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!s.enabled;
+    cb.onchange = async () => {
+      await fetch('/api/skills/toggle', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id: s.id, enabled: cb.checked})
+      });
+    };
+    h.append(b, i, cb);
+
+    const p = document.createElement('p');
+    p.textContent = s.desc || '（没写 description，模型看不出它干什么）';
+    card.append(h, p);
+
+    if (s.files && s.files.length) {
+      const sm = document.createElement('small');
+      sm.textContent = s.files.join(' · ');
+      card.appendChild(sm);
+    }
+    box.appendChild(card);
+  }
+}
+
+$('#skillBtn').onclick = async (e) => {
+  e.stopPropagation();
+  if (skEl.classList.toggle('on')) await loadSkills();
+};
+
+document.addEventListener('click', (e) => {
+  if (!skEl.classList.contains('on')) return;
+  if (skEl.contains(e.target) || e.target.id === 'skillBtn') return;
+  skEl.classList.remove('on');
+});
+
+$('#skMaster').onchange = async (e) => {
+  await fetch('/api/skills/toggle', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({master: e.target.checked})
+  });
 };
 
 // ---------------- 确认框 ----------------

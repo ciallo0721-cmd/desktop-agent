@@ -20,6 +20,7 @@ SHOT_DIR = DATA_DIR / "screenshots"
 IMAGE_DIR = DATA_DIR / "images"          # 用户发进来的图片（自动发送前已缩放）
 WORK_DIR = BASE_DIR / "workspace"
 PROMPT_DIR = BASE_DIR / "prompt"
+SKILL_DIR = BASE_DIR / "skills"
 CONFIG_PATH = DATA_DIR / "config.json"
 
 AUTOSTART_NAME = "WorkBuddyDesktopAgent"
@@ -61,6 +62,14 @@ DEFAULT_CONFIG = {
     "memory_every": 6,
     "appearance": "light",
 
+    # ---------------- Skill（技能插件） ----------------
+    # 总开关：关掉后系统提示词里不再出现技能清单，skill 工具也无法加载
+    "skills_enabled": True,
+    # 被用户显式关闭的技能 id 列表（覆盖 SKILL.md 里的 enabled）
+    "skills_disabled": [],
+    # skill_run 单次执行的超时（秒）
+    "skill_timeout": 120,
+
     "prompts": {
         "system": "prompt/systemprompt.md",
         "role": "prompt/roleprompt.md",
@@ -72,7 +81,7 @@ DEFAULT_CONFIG = {
 
 def ensure_dirs() -> None:
     for d in (DATA_DIR, CONV_DIR, CONV_TRASH_DIR, CONV_BACKUP_DIR,
-              SHOT_DIR, IMAGE_DIR, WORK_DIR, PROMPT_DIR):
+              SHOT_DIR, IMAGE_DIR, WORK_DIR, PROMPT_DIR, SKILL_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 

@@ -18,7 +18,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import config, llm, memory, prompts, tools, websearch
+from . import config, llm, memory, prompts, skills, tools, websearch
 from . import images as images_mod
 
 # ```action\n{...}\n```
@@ -215,6 +215,14 @@ def describe_action(act: dict) -> str:
         return str(act.get("query", ""))[:100]
     if tool == "web_fetch":
         return str(act.get("url", ""))[:100]
+    if tool == "skill":
+        name = str(act.get("name") or "")
+        rel = str(act.get("file") or "")
+        if not name:
+            return "列出技能"
+        return f"{name}" + (f" · {rel}" if rel else " · 读入说明书")
+    if tool == "skill_run":
+        return f"{act.get('name', '?')} · {str(act.get('cmd', ''))[:100]}"
     if tool == "done":
         return str(act.get("summary", ""))[:120]
     return ""
@@ -556,6 +564,49 @@ def execute_action(cfg: dict, act: dict, confirm=None, cancel=None) -> str:
             return websearch.fetch(url, max(500, min(limit, 40000)))
         except Exception as e:
             return f"【抓取失败】{type(e).__name__}: {e}"
+
+    # ---------------- Skill ----------------
+    if tool == "skill":
+        if not cfg.get("skills_enabled", True):
+            return ("【已关闭】技能功能被关掉了（设置里的「启用 Skill」）。"
+                    "让用户打开，或者直接按普通方式干活。")
+        name = str(act.get("name") or act.get("skill") or "").strip()
+        rel = str(act.get("file") or act.get("path") or "").strip()
+        if not name:
+            items = skills.active_skills(cfg)
+            if not items:
+                return "【没有技能】skills/ 目录里没有可用的技能包。"
+            return "【可用技能】\n" + "\n".join(s.one_line() for s in items)
+        try:
+            _ok, text = (skills.read_attachment(cfg, name, rel) if rel
+                         else skills.load_text(cfg, name))
+        except Exception as e:
+            return f"【技能读取失败】{type(e).__name__}: {e}"
+        return text
+
+    if tool == "skill_run":
+        if not cfg.get("skills_enabled", True):
+            return "【已关闭】技能功能被关掉了，skill_run 不可用。"
+        name = str(act.get("name") or act.get("skill") or "").strip()
+        cmd = str(act.get("cmd") or act.get("command") or "").strip()
+        if not name:
+            return "【参数错误】skill_run 需要 name（技能 id）。"
+        if not cmd:
+            return "【参数错误】skill_run 需要 cmd，比如 \"python scripts/run.py\"。"
+        if mode not in ("bash", "both"):
+            return "【不允许】当前是纯截屏模式，跑不了技能脚本。"
+        sk = skills.get_skill(name, cfg)
+        if not sk:
+            return f"【没有这个技能】{name!r}，先看系统提示里的技能清单。"
+        if not sk.enabled:
+            return f"【技能已禁用】{sk.sid} 是关闭状态，别用它。"
+        try:
+            timeout = int(cfg.get("skill_timeout") or 120)
+        except (TypeError, ValueError):
+            timeout = 120
+        result = tools.run_bash(cfg, cmd, confirm=confirm, cancel=cancel,
+                                workdir=str(sk.folder), timeout=timeout)
+        return f"[skill {sk.sid} · cwd={sk.folder}]\n{result}"
 
     if tool == "wait":
         return tools.wait(act.get("seconds", 1))

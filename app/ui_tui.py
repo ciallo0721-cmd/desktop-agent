@@ -17,6 +17,7 @@
     Ctrl+V       粘贴（终端自己处理，粘进来就行）
     Ctrl+G       把剪贴板里的图片收进待发列表
     /img 路径    附加一张图片（/img 单独敲 = 从剪贴板取，/img - 清空）
+    /skill       列出技能；/skill on|off <id> 开关，/skill cat <id> 看正文
     Ctrl+End     停止正在跑的这一轮（Ctrl+X 也行）
     Esc          清空输入
     Ctrl+Q       退出（连按两次，防止输入法卡 Ctrl 时误触）
@@ -31,7 +32,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from . import agent_core, config, images
+from . import agent_core, config, images, skills
 from .session import Session
 
 # ---------------------------------------------------------------- 终端底层
@@ -424,6 +425,11 @@ class TuiApp:
             self.input = ""
             self.dirty = True
             return
+        if text.startswith("/skill"):
+            self._cmd_skill(text[6:].strip())
+            self.input = ""
+            self.dirty = True
+            return
 
         imgs = list(self.pending)
         ok, err = self.sess.send(text, imgs)
@@ -436,6 +442,48 @@ class TuiApp:
         self.push("cya", "你 › " + tag + text)
         self.follow = True
         self.dirty = True
+
+    def _cmd_skill(self, arg: str) -> None:
+        """TUI 里的技能管理：/skill、/skill on|off|cat <id>。"""
+        skills.ensure_scaffold()
+        parts = arg.split(None, 1)
+        sub = parts[0].lower() if parts else ""
+        target = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub in ("on", "off"):
+            if not target:
+                self.push("yel", "/skill on|off <id>")
+                return
+            sk = skills.get_skill(target, self.sess.cfg)
+            if not sk:
+                self.push("red", f"没有这个技能：{target}")
+                return
+            on = sub == "on"
+            skills.set_enabled(self.sess.cfg, sk.sid, on)
+            self.push("grn", f"{sk.sid} 已{'启用' if on else '关闭'}")
+            return
+
+        if sub in ("cat", "show", "read"):
+            if not target:
+                self.push("yel", "/skill cat <id>")
+                return
+            ok, text = skills.load_text(self.sess.cfg, target)
+            for ln in text.splitlines()[:30]:
+                self.push("gry" if ok else "red", ln)
+            return
+
+        items = skills.list_skills(self.sess.cfg, fresh=True)
+        if not items:
+            self.push("gry", f"还没有技能。目录：{config.SKILL_DIR}")
+            return
+        master = "开" if self.sess.cfg.get("skills_enabled", True) else "关"
+        self.push("cya", f"技能（总开关 {master}）")
+        for sk in items:
+            desc = " ".join((sk.description or "").split())[:44]
+            mark = "开" if sk.enabled else "关"
+            self.push("grn" if sk.enabled else "gry",
+                      f"[{mark}] {sk.sid}  {desc}")
+        self.push("gry", f"目录：{config.SKILL_DIR}  ·  /skill on|off|cat <id>")
 
     def _cmd_img(self, arg: str) -> None:
         """命令行里没法选文件，只能给路径或从剪贴板抓。"""
