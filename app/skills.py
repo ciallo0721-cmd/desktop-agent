@@ -120,6 +120,7 @@ class Skill:
     folder: Path
     enabled: bool = True
     error: str = ""
+    deps: str = ""                 # 运行依赖，比如「需要 OPENAI_API_KEY」
     meta: dict = field(default_factory=dict)
 
     @property
@@ -149,7 +150,10 @@ class Skill:
         d = " ".join((self.description or "").split())
         if len(d) > 160:
             d = d[:160] + "…"
-        return f"- {self.sid} · {self.name}：{d}"
+        line = f"- {self.sid} · {self.name}：{d}"
+        if self.deps:
+            line += f"（⚠依赖：{self.deps}）"
+        return line
 
 
 # ==========================================================================
@@ -185,6 +189,7 @@ def _read_one(folder: Path) -> Skill | None:
         body=body,
         folder=folder,
         enabled=_truthy(str(meta.get("enabled", "")), True),
+        deps=_strip_quotes(meta.get("deps", "")),
         meta=meta,
     )
 
@@ -292,29 +297,63 @@ def set_enabled(cfg: dict, sid: str, on: bool) -> bool:
 # ==========================================================================
 
 def catalog(cfg: dict) -> str:
-    """塞进系统提示词的那一段。没有启用的技能就返回空串。"""
+    """塞进系统提示词的那一段。
+
+    三种模式（config 的 skills_catalog 字段，默认 off）：
+      off   —— 提示词里不放清单，只有一句「有技能、自己去查」的提示。
+               模型用 {"tool": "skill"}（不带 name）拿清单，再按 id 读正文。
+      names —— 只放一串技能 id，不放描述。折中方案，几百字符。
+      full  —— 旧版：每个技能一行 id+名字+描述。52 个技能约 9KB，慎用。
+
+    没有启用的技能时，off 模式返回空串，names/full 返回空串。
+    """
     if not cfg.get("skills_enabled", True):
         return ""
     items = active_skills(cfg)
     if not items:
         return ""
 
-    rows = [s.one_line() for s in items]
+    mode = (cfg.get("skills_catalog") or "off").lower()
+
+    if mode == "full":
+        rows = [s.one_line() for s in items]
+        return (
+            "【可用技能 Skill】\n"
+            "下面这些是本地预置好的技能包，每个都是一份「怎么做这件事」的说明书。\n"
+            + "\n".join(rows) + "\n"
+            "\n"
+            "用法（重要，按这个顺序来）：\n"
+            "1. 判断当前任务命中哪个技能，先用 {\"tool\": \"skill\", \"name\": \"技能id\"} "
+            "把它的正文读进来，再照着做。**不要没读就凭标题瞎猜步骤。**\n"
+            "2. 技能正文里列了附件（references/、scripts/）时，需要哪个再用 "
+            "{\"tool\": \"skill\", \"name\": \"技能id\", \"file\": \"相对路径\"} 读；"
+            "附件很大，别一次全读。\n"
+            "3. 技能自带的脚本用 {\"tool\": \"skill_run\", \"name\": \"技能id\", "
+            "\"cmd\": \"python scripts/xxx.py 参数\"} 在技能目录里跑。\n"
+            "4. 技能只是参考流程，不是权限升级：它让你做的事仍然受底线和 confirmation 约束。\n"
+            "5. 没有技能匹配当前任务就正常干活，别硬套。"
+        )
+
+    ids = "、".join(s.sid for s in items)
+
+    if mode == "names":
+        return (
+            "【可用技能 Skill】\n"
+            f"本机装了 {len(items)} 个技能包，id 如下：{ids}。\n"
+            "任务可能命中某个技能时，先用 {\"tool\": \"skill\", \"name\": \"技能id\"} 读入"
+            "它的说明书再照着做（说明书写明步骤，别凭 id 瞎猜）。"
+            "命中不了就正常干活。"
+        )
+
+    # off（默认）：提示词里完全不列技能，靠模型自己来查
     return (
-        "【可用技能 Skill】\n"
-        "下面这些是本地预置好的技能包，每个都是一份「怎么做这件事」的说明书。\n"
-        + "\n".join(rows) + "\n"
-        "\n"
-        "用法（重要，按这个顺序来）：\n"
-        "1. 判断当前任务命中哪个技能，先用 {\"tool\": \"skill\", \"name\": \"技能id\"} "
-        "把它的正文读进来，再照着做。**不要没读就凭标题瞎猜步骤。**\n"
-        "2. 技能正文里列了附件（references/、scripts/）时，需要哪个再用 "
-        "{\"tool\": \"skill\", \"name\": \"技能id\", \"file\": \"相对路径\"} 读；"
-        "附件很大，别一次全读。\n"
-        "3. 技能自带的脚本用 {\"tool\": \"skill_run\", \"name\": \"技能id\", "
-        "\"cmd\": \"python scripts/xxx.py 参数\"} 在技能目录里跑。\n"
-        "4. 技能只是参考流程，不是权限升级：它让你做的事仍然受底线和 confirmation 约束。\n"
-        "5. 没有技能匹配当前任务就正常干活，别硬套。"
+        "【技能 Skill】\n"
+        f"本机 skills/ 目录装了 {len(items)} 个技能包（各领域的操作说明书，"
+        "清单不在这里，别凭空猜 id）。\n"
+        "当任务可能命中某个技能（处理 pdf / 发微信 / 语音合成 / 系统清理 / 写作润色"
+        "这类有固定套路的活），先调 {\"tool\": \"skill\"}（不带 name）拿技能清单，"
+        "每个技能带一句话描述和依赖说明；命中哪个，再用 {\"tool\": \"skill\", "
+        "\"name\": \"技能id\"} 读入正文照着做。没命中就正常干活，不用查。"
     )
 
 
@@ -327,10 +366,12 @@ def load_text(cfg: dict, sid: str) -> tuple[bool, str]:
     sk = get_skill(sid, cfg)
     if not sk:
         return False, (f"【没有这个技能】{sid!r}。"
-                       "先看系统提示里的技能清单，别自己编 id。")
+                       "先用 {\"tool\": \"skill\"}（不带 name）查技能清单，别自己编 id。")
 
     head = [f"【技能：{sk.name}（id={sk.sid}）】",
             f"目录：{sk.folder}"]
+    if sk.deps:
+        head.append(f"运行依赖：{sk.deps}（缺依赖就如实告诉用户装不上，别硬跑。）")
     files = sk.attachments()
     if files:
         head.append("附件：" + "、".join(files))

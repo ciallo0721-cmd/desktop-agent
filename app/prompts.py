@@ -80,7 +80,7 @@ TOOL_DOCS = {
     "wait": '{"tool": "wait", "seconds": 2}  —— 等一会儿，用于等待窗口加载。',
     "ask": '{"tool": "ask", "question": "要问用户的话"}  —— 暂停并向用户提问，用户回答后继续。',
     "done": '{"tool": "done", "summary": "一句话总结完成了什么"}  —— 任务结束。',
-    "skill": '{"tool": "skill", "name": "技能id"}  —— 读入一个技能的完整说明书。读某个技能的附件用 {"tool": "skill", "name": "技能id", "file": "references/xx.md"}。',
+    "skill": '{"tool": "skill"}  —— 列出本机可用技能（每个带一句话描述和依赖说明）。任务可能命中技能时先查这个，别猜。\n           {"tool": "skill", "name": "技能id"}  —— 读入一个技能的完整说明书。读某个技能的附件用 {"tool": "skill", "name": "技能id", "file": "references/xx.md"}。',
     "skill_run": '{"tool": "skill_run", "name": "技能id", "cmd": "python scripts/xxx.py 参数"}  —— 在技能自己的目录里执行命令，用于跑技能自带的脚本。',
 }
 

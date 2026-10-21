@@ -597,7 +597,8 @@ def execute_action(cfg: dict, act: dict, confirm=None, cancel=None) -> str:
             return "【不允许】当前是纯截屏模式，跑不了技能脚本。"
         sk = skills.get_skill(name, cfg)
         if not sk:
-            return f"【没有这个技能】{name!r}，先看系统提示里的技能清单。"
+            return (f"【没有这个技能】{name!r}。先用 {{\"tool\": \"skill\"}} "
+                    "（不带 name）查一下技能清单，别自己编 id。")
         if not sk.enabled:
             return f"【技能已禁用】{sk.sid} 是关闭状态，别用它。"
         try:
