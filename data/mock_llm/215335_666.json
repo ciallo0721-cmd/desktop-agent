@@ -1,0 +1,14 @@
+{
+  "model": "mock-model",
+  "stream": false,
+  "messages": [
+    {
+      "role": "system",
+      "content": "测试系统提示词"
+    },
+    {
+      "role": "user",
+      "content": "你好"
+    }
+  ]
+}

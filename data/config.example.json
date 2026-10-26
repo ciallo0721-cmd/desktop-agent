@@ -24,6 +24,8 @@
   "screen_control": true,
   "autostart": false,
   "temperature": 0.7,
+  "show_reasoning": true,
+  "extra_params": {},
   "memory_every": 6,
   "appearance": "light",
   "skills_enabled": true,

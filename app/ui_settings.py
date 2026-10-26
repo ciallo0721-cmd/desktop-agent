@@ -2,6 +2,7 @@
 """设置窗口。"""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -131,6 +132,34 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkEntry(row2, textvariable=self.v_memevery, width=45).pack(side="left")
         ctk.CTkLabel(row2, text=" 轮总结一次", anchor="w").pack(side="left")
 
+        # ---------- 模型参数 ----------
+        self._section(scroll, "模型参数")
+        row3 = ctk.CTkFrame(scroll, fg_color="transparent")
+        row3.pack(fill="x", pady=3)
+        ctk.CTkLabel(row3, text="温度", width=90, anchor="w").pack(side="left")
+        self.v_temp = tk.StringVar(value=str(cfg.get("temperature", 0.7)))
+        ctk.CTkEntry(row3, textvariable=self.v_temp, width=55).pack(side="left")
+        ctk.CTkLabel(row3, text="  0 ~ 2，越低越稳越高越发散",
+                     text_color="#888888", anchor="w",
+                     font=ctk.CTkFont(size=11)).pack(side="left")
+
+        self.sw_think = self._switch(
+            scroll, "在对话里显示思考过程（推理模型的 reasoning）",
+            bool(cfg.get("show_reasoning", True)),
+        )
+
+        _extra = cfg.get("extra_params")
+        _extra_txt = json.dumps(_extra, ensure_ascii=False, indent=2) if isinstance(
+            _extra, dict) and _extra else ""
+        self.f_extra = Field(scroll, "自定义参数", _extra_txt)
+        ctk.CTkLabel(
+            scroll,
+            text='原样合并进请求的 JSON 对象，例：{"top_p": 0.9, "max_tokens": 4096}\n'
+                 "model / messages / stream / tools 是保留字段，填了会被忽略。",
+            text_color="#888888", anchor="w", justify="left",
+            font=ctk.CTkFont(size=11),
+        ).pack(fill="x", padx=8)
+
         # ---------- Prompt 文件 ----------
         self._section(scroll, "Prompt 文件")
         btns = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -202,6 +231,22 @@ class SettingsWindow(ctk.CTkToplevel):
             messagebox.showwarning("打不开", str(e), parent=self)
 
     # ------------------------------------------------------------------
+    def _parse_extra(self) -> tuple[dict | None, str]:
+        """自定义参数输入框 → dict。返回 (值, 错误)。"""
+        raw = (self.f_extra.get() or "").strip()
+        if not raw:
+            return {}, ""
+        try:
+            val = json.loads(raw)
+        except json.JSONDecodeError as e:
+            return None, f"自定义参数不是合法 JSON：{e}"
+        if not isinstance(val, dict):
+            return None, '自定义参数必须是 JSON 对象，比如 {"top_p": 0.9}'
+        for k in val:
+            if k in llm.RESERVED_PARAMS:
+                return None, f"「{k}」是协议保留字段，不能自定义"
+        return val, ""
+
     def _collect(self) -> dict:
         cfg = dict(self.cfg)
         cfg["user_name"] = self.f_user.get() or "用户"
@@ -239,12 +284,24 @@ class SettingsWindow(ctk.CTkToplevel):
             cfg["memory_every"] = max(1, int(self.v_memevery.get()))
         except ValueError:
             cfg["memory_every"] = 6
+        try:
+            cfg["temperature"] = min(2.0, max(0.0, float(self.v_temp.get())))
+        except ValueError:
+            cfg["temperature"] = 0.7
+        cfg["show_reasoning"] = bool(self.sw_think.var.get())
+        extra, _err = self._parse_extra()
+        if extra is not None:
+            cfg["extra_params"] = extra
         return cfg
 
     def _save(self) -> None:
         cfg = self._collect()
         if not cfg["main_api"]["api_key"]:
             messagebox.showwarning("缺少 Key", "主 API Key 是必填的。", parent=self)
+            return
+        extra, err = self._parse_extra()
+        if extra is None:
+            messagebox.showwarning("参数不对", err, parent=self)
             return
 
         old_auto = bool(self.cfg.get("autostart", False))

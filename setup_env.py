@@ -472,7 +472,7 @@ def main() -> int:
     force_utf8()
     enable_ansi()
 
-    show(f"\n{BOLD}{CYAN}  >>> Desktop Agent · 启动器 <<<{RESET}\n")
+    show(f"\n{BOLD}{CYAN}  >>> PawPilot · 启动器 <<{RESET}\n")
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (BASE_DIR / "workspace").mkdir(exist_ok=True)

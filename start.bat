@@ -1,7 +1,7 @@
 @echo off
 setlocal
 chcp 65001 >nul
-title Desktop Agent
+title PawPilot
 cd /d "%~dp0"
 
 rem ============================================================
@@ -35,14 +35,14 @@ exit /b 0
 
 rem ---------- console modes ----------
 :console
-start "Desktop Agent - %~1" cmd /k chcp 65001 ^>nul ^&^& %PY% agent.py %~1
+start "PawPilot - %~1" cmd /k chcp 65001 ^>nul ^&^& %PY% agent.py %~1
 exit /b 0
 
 rem ---------- debug ----------
 :debug
 echo.
 echo   ==========================================
-echo    Desktop Agent  /  debug console
+echo    PawPilot  /  debug console
 echo   ==========================================
 echo.
 echo   [*] Python : %PY%

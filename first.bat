@@ -1,12 +1,12 @@
 @echo off
 setlocal
 chcp 65001 >nul
-title Desktop Agent - Launcher
+title PawPilot - Launcher
 cd /d "%~dp0"
 
 echo.
 echo   ============================================
-echo    Desktop Agent  /  first-time launcher
+echo    PawPilot  /  first-time launcher
 echo   ============================================
 echo.
 

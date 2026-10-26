@@ -1,0 +1,20 @@
+[
+  {
+    "id": "daily-brief",
+    "name": "每日早报",
+    "prompt": "联网搜索今天的科技新闻，整理成 5 条一句话摘要发给我。",
+    "kind": "daily",
+    "time": "08:30",
+    "enabled": false,
+    "last_run": 0
+  },
+  {
+    "id": "workspace-check",
+    "name": "工作区巡检",
+    "prompt": "查看 workspace/ 目录里有没有新增文件，如果有就列出来告诉我。",
+    "kind": "interval",
+    "interval_min": 120,
+    "enabled": false,
+    "last_run": 0
+  }
+]

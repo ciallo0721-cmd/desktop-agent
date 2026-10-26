@@ -47,6 +47,11 @@ DEFAULT_CONFIG = {
     "history_limit": 24,
 
     "sandbox": True,
+    # 隔离档位："off" = 钉目录+高危拦截（默认，快） | "wsb" = 命令进 Windows Sandbox 真隔离
+    # wsb 需要 Win10/11 专业版并启用「Windows 沙盒」功能，每条命令有 10~20s 启动开销
+    "sandbox_mode": "off",
+    # wsb 模式里沙箱是否允许联网。默认 False = 沙箱内禁网，隔离更彻底
+    "sandbox_network": False,
     "screen_control": True,
     # 联网：默认开。不填 Key 也能用（抓 360 / Bing 结果页），
     # 填了 provider + api_key 就走 Tavily / Serper 的正式接口。
@@ -59,8 +64,29 @@ DEFAULT_CONFIG = {
     "screenshot_scale": 1.0,
     "autostart": False,
     "temperature": 0.7,
+    # 显示模型的思考过程（reasoning_content）。推理模型会把思考单独吐出来，
+    # 关掉就只显示正文，界面更干净。
+    "show_reasoning": True,
+    # 额外请求参数：原样合并进 /chat/completions 的 payload。
+    # 例：{"top_p": 0.9, "frequency_penalty": 0.2, "max_tokens": 4096,
+    #      "response_format": {"type": "json_object"}}
+    # 保留字段（model / messages / stream / tools）会被忽略，改不了核心协议。
+    "extra_params": {},
     "memory_every": 6,
     "appearance": "light",
+
+    # ---------------- 模型协议 ----------------
+    # function calling 双轨："auto" = 请求同时带 tools 定义，模型会 FC 就走原生
+    # tool_calls，只会吐文本就走 ```action 解析；接口不支持 tools 时自动退回。
+    # "off" = 永远只用文本协议。"on" = 强制带 tools（失败不重试）。
+    "native_tools": "auto",
+
+    # ---------------- 通知 ----------------
+    "notify": {
+        "task_done": True,     # 定时任务完成时通知
+        "windows": True,       # Windows 右下角系统通知
+        "telegram": True,      # TG 推给 allowed_users[0]（需 TG 通道已配置）
+    },
 
     # ---------------- Skill（技能插件） ----------------
     # 总开关：关掉后系统提示词里不再出现技能清单，skill 工具也无法加载
@@ -76,6 +102,20 @@ DEFAULT_CONFIG = {
         "memory": "prompt/memory.md",
         "persona": "prompt/人设.md",
     },
+
+    # ---------------- 远程 / IM / 定时任务 ----------------
+    # Web 远程访问：开启后监听 0.0.0.0（局域网可达），必须配 token 才安全
+    "web_remote": False,
+    "web_token": "",
+    # Telegram 通道：见 app/channel_telegram.py 文件头说明
+    "telegram": {
+        "enabled": False,
+        "bot_token": "",
+        "allowed_users": [],
+        "proxy": "",
+    },
+    # 定时任务总开关（任务列表在 data/schedule.json）
+    "scheduler_enabled": True,
 }
 
 

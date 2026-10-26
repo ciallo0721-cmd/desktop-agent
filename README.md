@@ -1,6 +1,6 @@
-# Desktop Agent
+# PawPilot
 
-跑在自己 Windows 电脑上的桌面 Agent。能执行命令、截屏看图、点鼠标打字、联网搜索。
+跑在自己 Windows 电脑上的桌面 Agent（原名 Desktop Agent）。能执行命令、截屏看图、点鼠标打字、联网搜索，还能接 Telegram、跑定时任务、进真沙箱。
 界面用 customtkinter，模型走任何 OpenAI 兼容接口。
 
 ## 它和普通聊天框的区别
@@ -161,7 +161,13 @@ app/
   memory.py         长期记忆读写
   images.py         用户发的图片：校验、缩放、落盘、转 data URI
   skills.py         技能扫描、frontmatter 解析、按需加载、附件越界拦截
-  agent_core.py     动作解析、工具分发、多步循环
+  sandbox.py        Windows Sandbox 真隔离执行通道（.wsb 生成 + 输出回传）
+  scheduler.py      定时任务调度 + 任务管理 API（data/schedule.json，改完即生效）
+  channel_telegram.py  Telegram 远程通道（长轮询 + 白名单）
+  market.py         技能市场：注册表 / 一键安装 / sha256 签名校验
+  notify.py         通知推送（Windows 系统通知 + TG）
+  usage.py          token 花费统计（data/usage.jsonl + Web 面板汇总）
+  agent_core.py     动作解析、工具分发、FC 双轨主循环
   session.py        四种前端共用的会话服务
   ui_main.py        GUI 主窗口
   ui_settings.py    GUI 设置窗口
@@ -191,7 +197,7 @@ systemprompt.md → memory.md → 是否新对话 → 人设.md → roleprompt.m
 
 ## 工具协议
 
-不用 function calling，任何 OpenAI 兼容接口都能用。模型输出一个代码块：
+不用 function calling 也能用，任何 OpenAI 兼容接口都能用。模型输出一个代码块：
 
 ````
 ```action
@@ -199,15 +205,121 @@ systemprompt.md → memory.md → 是否新对话 → 人设.md → roleprompt.m
 ```
 ````
 
+**双轨协议**（`native_tools`，默认 `auto`）：请求同时带 OpenAI tools 定义，
+模型会原生 function calling 就走 `tool_calls`（一轮可执行多个调用，参数是结构化的，不再靠猜）；
+只会吐文本就自动退回上面的 ```action 解析。接口不支持 tools 参数会自动拉黑并降级，
+不用改配置。设 `off` 强制只用文本轨。
+
 解析层同时兼容 DeepSeek 的 DSML 语法（`invoke name=` / `parameter name=`）作为兜底，
 所以模型就算不守规矩也照样能动。
+
+### 推理模型注意（deepseek-flash / reasoner 这类）
+
+- **思考 token 也算进 `max_tokens`**。给太小（比如 100）会全部烧在 `reasoning_content` 上，
+  `content` 是空串、`finish_reason=length`。`chat_once` 遇到这种会自动把额度乘 4 重试一次，
+  还空就抛明确错误，不再静默返回空字符串。
+- **原生 FC 轨正文常常是空的**，只有 `tool_calls`。主循环判定「空回复失败」时会先看有没有
+  tool_calls，有就照常执行，不会误报「模型返回了空内容」。
+- 实测 deepseek-flash：流式正常、原生 FC 正常、接口回传完整 usage（含 `reasoning_tokens`），
+  统计面板因此能拿到精确 token 数，不再是字符估算。附带代价是 prompt 不复用——每轮都全量
+  重发系统提示，一步 6k 上下的 prompt token。
+
+## Agent 自建定时任务 / 技能市场
+
+两个新工具：
+
+- `schedule`：让 agent 自己管理定时任务（list / add / remove / toggle）。
+  直接说「每天早上八点半搜新闻发我」，它就会建任务。
+- `market`：技能市场注册表在 `data/market.json`，条目带 `source`（SKILL.md raw 链接 /
+  .zip / git 仓库）和可选 `sha256` 签名。`{"tool":"market","op":"install","id":"..."}`
+  一键安装；登记了 sha256 的安装时自动校验，对不上拒装——防供应链投毒。
+  只装注册表里有的来源，模型报的 URL 一律不认。
+
+## 通知 / 统计 / 截图缓存
+
+- 定时任务跑完自动推送：Windows 右下角系统通知 + Telegram（`notify` 配置可分别开关）。
+- token 花费统计：每次请求记一行到 `data/usage.jsonl`（字符数估算，非精确计费），
+  Web 界面右上角「统计」面板看今天 / 7 天 / 按模型。
+- 截图缓存：画面一个字节没变就复用上一张文件，并且**不再重复发同一张图给模型**
+  （一屏截图上万 token，重复发纯烧钱）。
 
 ## 安全
 
 - 高危命令（`rm -r`、`format`、`shutdown`、`diskpart`…）不直接执行，先弹窗让用户点头，
   拒绝后把结果回传给模型让它换方案。
-- 沙箱模式只是把工作目录钉在 `workspace/` 并匹配高危正则，**不是真隔离**。
-  要真隔离请开虚拟机。
+- 隔离分两档（配置 `sandbox_mode`）：
+  - `off`（默认）：工作目录钉在 `workspace/` + 高危正则。快，但不是真隔离。
+  - `wsb`：命令整体丢进 **Windows Sandbox** 虚拟机执行（见下节），真隔离。
+    需要 Win10/11 专业版并启用「Windows 沙盒」功能；每条命令有 10~20s 启动开销，
+    沙箱内用 CMD 语法，项目目录只读映射，可配置禁网。
+
+## 真隔离（Windows Sandbox 模式）
+
+`data/config.json` 里：
+
+```json
+{
+  "sandbox_mode": "wsb",
+  "sandbox_network": false
+}
+```
+
+开启后所有 `bash` 工具的命令都会走沙箱：生成 `.wsb` → 启动 Windows Sandbox →
+自动执行 → 输出回传 → 自动关闭。宿主机零接触（除了读写 `data/sandbox/` 交换目录）。
+高危确认弹窗在进沙箱之前照常生效。
+
+## 定时任务
+
+任务列表在 `data/schedule.json`（改完保存即生效，不用重启），启动时自动加载：
+
+```json
+[
+  {
+    "id": "daily-brief",
+    "name": "每日早报",
+    "prompt": "联网搜今天的科技新闻，整理成 5 条摘要",
+    "kind": "daily",
+    "time": "08:30",
+    "interval_min": 120,
+    "enabled": true
+  }
+]
+```
+
+`kind` 填 `daily`（每天定点，用 `time`）或 `interval`（间隔循环，用 `interval_min`）。
+到点 agent 会自己跑这个 prompt，结果追加写进 `data/schedule_log.jsonl`。
+无人值守环境下高危命令没有弹窗确认，会直接拒绝——这是刻意的。
+
+## Telegram 远程遥控
+
+`data/config.json`：
+
+```json
+{
+  "telegram": {
+    "enabled": true,
+    "bot_token": "@BotFather 建机器人拿到的 token",
+    "allowed_users": [123456789],
+    "proxy": "http://127.0.0.1:7890"
+  }
+}
+```
+
+只依赖 requests + 长轮询，不需要公网 IP。`allowed_users` 是硬门槛，名单外的人说什么都不理。
+`/new` 新对话、`/stop` 停止、其他文字直接发给 agent。高危命令远程一律自动拒绝。
+
+## Web 远程访问
+
+默认只监听 `127.0.0.1`。想用手机/别的电脑访问，在 `data/config.json`：
+
+```json
+{
+  "web_remote": true,
+  "web_token": "编一个足够长的随机串"
+}
+```
+
+然后 `start.bat web`，控制台会打印带 token 的局域网地址。没设 token 时远程模式拒绝启动，防止裸奔。
 
 ## 已知限制
 
@@ -226,6 +338,39 @@ systemprompt.md → memory.md → 是否新对话 → 人设.md → roleprompt.m
 | `skills_enabled` | `true` | 总开关，关掉后技能清单不进提示词，`skill` 工具也拒绝 |
 | `skills_disabled` | `[]` | 被关掉的技能 id，覆盖 SKILL.md 里的 `enabled` |
 | `skill_timeout` | `120` | `skill_run` 单次执行超时（秒） |
+| `sandbox_mode` | `off` | `off` = 钉目录+高危拦截；`wsb` = Windows Sandbox 真隔离 |
+| `sandbox_network` | `false` | wsb 模式里沙箱是否允许联网 |
+| `web_remote` / `web_token` | `false` / 空 | Web 远程监听开关 + 访问令牌（远程必须配 token） |
+| `telegram` | 关闭 | Telegram 通道配置（enabled / bot_token / allowed_users / proxy） |
+| `scheduler_enabled` | `true` | 定时任务总开关，任务列表在 `data/schedule.json` |
+| `native_tools` | `auto` | FC 双轨：`auto` 自动适配 / `on` 强制 / `off` 只用文本协议 |
+| `notify` | 全开 | 任务完成通知（task_done / windows / telegram） |
+| `temperature` | `0.7` | 采样温度 0~2，Web 界面「参数」面板可实时调 |
+| `show_reasoning` | `true` | 显示推理模型的思考过程（`reasoning_content`） |
+| `extra_params` | `{}` | 自定义请求参数，原样合并进 payload |
+
+## 思考过程 / 自定义参数
+
+**显示思考**：推理模型（deepseek-flash、各种 reasoner）会把思考单独放在
+`reasoning_content` 里。开着 `show_reasoning` 时：
+
+- Web：正文上方出现灰色可折叠块，流式滚动更新，收尾自动折叠成「思考过程 · N 字」
+- GUI：聊天气泡里以「〈思考〉」开头，超过 800 字自动折叠
+- TUI：一行跟随刷新的「思考 › …」（只显示尾部 400 字）
+
+关掉就完全看不到思考，只留正文，界面干净也省一些传输。
+
+**自定义温度**：Web「参数」面板有滑条（0~2，含 0/0.3/0.7/1.0/1.5 预设），
+GUI 在「设置 → 模型参数」。改完立刻对下一条消息生效，不用重启。
+
+**自定义参数**：填一个 JSON 对象，原样合并进 `/chat/completions` 的 payload：
+
+```json
+{"top_p": 0.9, "frequency_penalty": 0.2, "max_tokens": 4096}
+```
+
+`model` / `messages` / `stream` / `tools` 是协议保留字段，填了会被忽略；
+`null` 值的键直接跳过。JSON 写错、或塞了保留字段，保存时会直接报错而不是静默失败。
 
 ## License
 

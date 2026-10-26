@@ -371,7 +371,7 @@ def run(cfg: dict | None = None) -> int:
     printer = _Printer()
     pending: list[str] = []
 
-    print(_color("b", "Desktop Agent · CLI"))
+    print(_color("b", "PawPilot · CLI"))
     print(_color("gry", f"模型 {s.cfg.get('main_api', {}).get('model') or '未配置'}"
                         f"  ·  方式 {s.cfg.get('agent_mode', 'both')}"
                         f"  ·  对话 {s.conv.title}"))

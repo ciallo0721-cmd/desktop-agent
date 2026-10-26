@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """工具实现：bash 执行、截屏、鼠标键盘。
 
-说明：sandbox 不是真正的容器隔离，它做两件事：
-  1. 把工作目录钉死在 workspace/，命令里 cd 不出去（靠 cwd 参数 + 前缀检查）
-  2. 拦截高危命令
-真隔离要靠虚拟机或容器，这个功能做不到，别指望它。
+隔离分两档（配置项 sandbox_mode）：
+  off        纸糊档：工作目录钉在 workspace/ + 高危正则拦截（默认，快）
+  wsb        真隔离：命令丢进 Windows Sandbox 虚拟机跑，见 sandbox.py
+两档的高危命令检测都始终生效，命中都弹窗确认。
 """
 from __future__ import annotations
 
@@ -177,6 +177,13 @@ def run_bash(cfg: dict, cmd: str, confirm=None, cancel=None,
                 "换个安全的方式重做，或者先问清楚用户到底想干什么。"
             )
 
+    # 真隔离档：整条命令丢进 Windows Sandbox 虚拟机，和宿主机完全隔离。
+    # 高危检测在下面照常先跑一遍，确认通过了才进沙箱。
+    if str(cfg.get("sandbox_mode") or "").strip().lower() == "wsb":
+        from . import sandbox
+
+        return sandbox.run_in_sandbox(cfg, cmd, workdir=workdir, timeout=timeout)
+
     bash = config.find_bash(cfg)
     if workdir:
         cwd_path = Path(workdir)
@@ -293,6 +300,20 @@ def run_bash(cfg: dict, cmd: str, confirm=None, cancel=None,
 # 屏幕
 # --------------------------------------------------------------------------
 
+# 截图缓存：画面没变时不产生新文件，agent_core 也不会重复发同一张图。
+# 一屏 1080p PNG 好几 MB，base64 一次就是上万 token，重复发纯烧钱。
+_LAST_SHOT: dict = {"hash": None, "path": None}
+
+
+def _img_hash(img) -> str:
+    import hashlib
+    import io
+
+    buf = io.BytesIO()
+    img.save(buf, "BMP")
+    return hashlib.sha256(buf.getvalue()).hexdigest()
+
+
 def virtual_origin() -> tuple[int, int]:
     """虚拟桌面左上角在屏幕坐标里的位置（多显示器时可能是负数）。"""
     if sys.platform != "win32":
@@ -331,6 +352,14 @@ def grab_screen(scale: float = 1.0) -> tuple[Path, int, int]:
     except TypeError:          # 老版本 Pillow 没有 all_screens 参数
         img = ImageGrab.grab()
 
+    # 缓存命中：画面一个字节都没变 + 同样的缩放比 → 直接复用上一张文件
+    key = _img_hash(img) + f"@{scale:.3f}"
+    cached = _LAST_SHOT.get("path")
+    if key == _LAST_SHOT.get("hash") and cached and Path(cached).exists():
+        _LAST_SHOT["hit"] = True
+        return cached, _LAST_SHOT["w"], _LAST_SHOT["h"]
+    _LAST_SHOT["hit"] = False
+
     _SCREEN_ORIGIN = virtual_origin()
     orig_w, orig_h = img.size
 
@@ -349,6 +378,11 @@ def grab_screen(scale: float = 1.0) -> tuple[Path, int, int]:
             path = jpg
     except OSError:
         pass
+
+    _LAST_SHOT["hash"] = key
+    _LAST_SHOT["path"] = str(path)
+    _LAST_SHOT["w"] = img.size[0]
+    _LAST_SHOT["h"] = img.size[1]
 
     return path, img.size[0], img.size[1]
 
@@ -385,6 +419,8 @@ def screenshot(cfg: dict) -> dict:
     except Exception as e:
         return {"text": f"【截屏失败】{type(e).__name__}: {e}"}
 
+    cache_hit = bool(_LAST_SHOT.get("hit"))
+
     ox, oy = _SCREEN_ORIGIN
     size_note = f"图片尺寸 {w}x{h} 像素"
     if ox or oy:
@@ -397,6 +433,10 @@ def screenshot(cfg: dict) -> dict:
             "程序会自动换算到真实屏幕。不要自己乘缩放比例，图上多少就是多少。\n"
             "如果这一步只是想确认刚才的操作有没有生效，看完图片直接判断就行。"
         )
+        if cache_hit:
+            hint += ("\n【缓存】这张图和上一张完全一致（画面没有任何变化），"
+                     "没有产生新截图。如果你已经看过这张画面，不要重复截屏，"
+                     "直接基于已看到的内容行动。")
         if scale < 1.0:
             hint += f"\n注意：图片被等比缩放到 {scale:.2f} 倍，量坐标时以图片像素为准即可。"
         return {"text": hint, "image": str(path)}

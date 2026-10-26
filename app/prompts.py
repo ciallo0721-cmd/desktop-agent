@@ -82,6 +82,8 @@ TOOL_DOCS = {
     "done": '{"tool": "done", "summary": "一句话总结完成了什么"}  —— 任务结束。',
     "skill": '{"tool": "skill"}  —— 列出本机可用技能（每个带一句话描述和依赖说明）。任务可能命中技能时先查这个，别猜。\n           {"tool": "skill", "name": "技能id"}  —— 读入一个技能的完整说明书。读某个技能的附件用 {"tool": "skill", "name": "技能id", "file": "references/xx.md"}。',
     "skill_run": '{"tool": "skill_run", "name": "技能id", "cmd": "python scripts/xxx.py 参数"}  —— 在技能自己的目录里执行命令，用于跑技能自带的脚本。',
+    "schedule": '{"tool": "schedule", "op": "list"}  —— 列出当前所有定时任务。\n           {"tool": "schedule", "op": "add", "task": {"id": "short-id", "name": "显示名", "prompt": "到点要执行的任务描述", "kind": "daily 或 interval", "time": "08:30", "interval_min": 120}}  —— 新建。daily 用 time，interval 用 interval_min。用户说「每天 X 点…」「每隔 X 分钟…」时用它，建之前先跟用户确认时间点。\n           {"tool": "schedule", "op": "remove", "id": "任务id"}  删除；{"tool": "schedule", "op": "toggle", "id": "任务id", "enabled": false}  停用/启用。',
+    "market": '{"tool": "market"}  —— 列出技能市场注册表（data/market.json）里有哪些可装技能。\n           {"tool": "market", "op": "install", "id": "技能id"}  —— 一键安装。只装注册表里有 source 的；登记了 sha256 会自动做签名校验，对不上拒装。装技能前必须征得用户同意。',
 }
 
 
@@ -102,9 +104,93 @@ def tool_docs(mode: str, screen_ok: bool, screen_control: bool,
     if web:
         names += ["web_search", "web_fetch"]
     if use_skills:
-        names += ["skill", "skill_run"]
-    names += ["wait", "ask", "done"]
+        names += ["skill", "skill_run", "market"]
+    names += ["schedule", "wait", "ask", "done"]
     return "\n".join(TOOL_DOCS[n] for n in names if n in TOOL_DOCS)
+
+
+# ==========================================================================
+# OpenAI function calling 规格（双轨协议的原生轨）
+# ==========================================================================
+
+# 每个工具的 JSON Schema。文本协议（```action）和原生 FC 用同一份工具清单。
+_OPENAI_SCHEMAS = {
+    "bash": ("执行 shell 命令，返回 stdout/stderr",
+             {"cmd": {"type": "string", "description": "要执行的命令"}}),
+    "screenshot": ("截取屏幕，你会直接看到截图",
+                   {"region": {"type": "array", "items": {"type": "integer"},
+                               "description": "可选 [x,y,w,h]，只截一块"}}),
+    "click": ("点击屏幕坐标", {"x": {"type": "integer"}, "y": {"type": "integer"},
+                              "button": {"type": "string", "enum": ["left", "right", "double"]}}),
+    "type": ("在焦点位置打字", {"text": {"type": "string"}}),
+    "key": ("按键", {"keys": {"type": "string", "description": "如 ctrl+s"}}),
+    "move": ("移动鼠标", {"x": {"type": "integer"}, "y": {"type": "integer"}}),
+    "scroll": ("滚动滚轮", {"amount": {"type": "integer"}}),
+    "copy_region": ("截区域进剪贴板", {"x": {"type": "integer"}, "y": {"type": "integer"},
+                                      "w": {"type": "integer"}, "h": {"type": "integer"}}),
+    "clipboard": ("读/写剪贴板", {"action": {"type": "string", "enum": ["read", "write"]},
+                                 "text": {"type": "string"}}),
+    "web_search": ("联网搜索", {"query": {"type": "string"},
+                               "count": {"type": "integer"}}),
+    "web_fetch": ("抓取网页正文", {"url": {"type": "string"}}),
+    "wait": ("等待若干秒", {"seconds": {"type": "number"}}),
+    "ask": ("向用户提问并暂停", {"question": {"type": "string"}}),
+    "done": ("任务完成", {"summary": {"type": "string"}}),
+    "skill": ("读技能说明书/列技能清单",
+              {"name": {"type": "string", "description": "留空=列清单"},
+               "file": {"type": "string"}}),
+    "skill_run": ("在技能目录里跑脚本", {"name": {"type": "string"},
+                                        "cmd": {"type": "string"}}),
+    "schedule": ("管理定时任务（列表/新建/删除/开关）",
+                 {"op": {"type": "string", "enum": ["list", "add", "remove", "toggle"]},
+                  "task": {"type": "object", "description": "add 时必填：{id,name,prompt,kind,time 或 interval_min}"},
+                  "id": {"type": "string"},
+                  "enabled": {"type": "boolean"}}),
+    "market": ("技能市场：列出可装技能 / 一键安装",
+               {"op": {"type": "string", "enum": ["list", "install"]},
+                "id": {"type": "string"}}),
+}
+
+_REQUIRED = {"bash": ["cmd"], "click": ["x", "y"], "type": ["text"], "key": ["keys"],
+             "move": ["x", "y"], "scroll": ["amount"], "copy_region": ["x", "y", "w", "h"],
+             "web_search": ["query"], "web_fetch": ["url"], "ask": ["question"],
+             "skill_run": ["name", "cmd"]}
+
+
+def openai_tools(mode: str, screen_ok: bool, screen_control: bool,
+                 web: bool = True, use_skills: bool = False) -> list[dict]:
+    """生成 OpenAI tools 参数。和 tool_docs 用同一份名单，双轨不脱节。"""
+    names: list[str] = []
+    if mode in ("bash", "both"):
+        names.append("bash")
+    if mode in ("screen", "both") and screen_ok:
+        names.append("screenshot")
+    if mode in ("screen", "both") and screen_control:
+        names += ["click", "type", "key", "move", "scroll", "copy_region", "clipboard"]
+    if web:
+        names += ["web_search", "web_fetch"]
+    if use_skills:
+        names += ["skill", "skill_run", "market"]
+    names += ["schedule", "wait", "ask", "done"]
+
+    out = []
+    for n in names:
+        if n not in _OPENAI_SCHEMAS:
+            continue
+        desc, props = _OPENAI_SCHEMAS[n]
+        out.append({
+            "type": "function",
+            "function": {
+                "name": n,
+                "description": desc,
+                "parameters": {
+                    "type": "object",
+                    "properties": props,
+                    "required": _REQUIRED.get(n, []),
+                },
+            },
+        })
+    return out
 
 
 def read_text(path: Path, fallback: str = "") -> str:

@@ -18,7 +18,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import config, llm, memory, prompts, skills, tools, websearch
+from . import config, llm, market, memory, prompts, scheduler, skills, tools, usage, websearch
 from . import images as images_mod
 
 # ```action\n{...}\n```
@@ -63,6 +63,52 @@ DSML_LINE = re.compile(
 )
 
 TOOL_RESULT_PREFIX = "[工具 {name} 的执行结果]"
+
+# 原生 function calling 被接口拒绝过的 (base_url, model)，进程内记住，不再试
+_NATIVE_BLOCKED: set = set()
+
+
+def _looks_like_tools_reject(msg: str) -> bool:
+    m = msg.lower()
+    return ("tool" in m or "schema" in m) and any(
+        k in m for k in ("400", "invalid", "unknown", "not support", "unsupported")
+    )
+
+
+def _msg_chars(messages: list[dict]) -> int:
+    """粗算请求体字符量，给 usage 统计用。"""
+    n = 0
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str):
+            n += len(c)
+        elif isinstance(c, list):
+            for p in c:
+                if isinstance(p, dict):
+                    if p.get("type") == "text":
+                        n += len(str(p.get("text") or ""))
+                    elif p.get("type") == "image_url":
+                        n += 4000          # 一张截图粗算 ~2000 token
+    return n
+
+
+def _fc_actions(fc_calls: list[dict]) -> list[dict]:
+    """把模型吐的原生 tool_calls 转成内部统一的动作列表。"""
+    out: list[dict] = []
+    for tc in fc_calls:
+        fn = tc.get("function") or {}
+        raw = str(fn.get("arguments") or "")
+        try:
+            args = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            args = {"_raw_arguments": raw[:400]}
+        if not isinstance(args, dict):
+            args = {"value": args}
+        act = dict(args)
+        act["tool"] = str(fn.get("name") or "").strip()
+        act["_tool_call_id"] = tc.get("id") or f"call_{len(out)}"
+        out.append(act)
+    return out
 
 # 这些参数要转成数字，否则 click 之类会拿到字符串
 _DSML_NUM_KEYS = {"x", "y", "amount", "seconds", "width", "height", "count"}
@@ -223,6 +269,20 @@ def describe_action(act: dict) -> str:
         return f"{name}" + (f" · {rel}" if rel else " · 读入说明书")
     if tool == "skill_run":
         return f"{act.get('name', '?')} · {str(act.get('cmd', ''))[:100]}"
+    if tool == "schedule":
+        op = str(act.get("op") or "list").lower()
+        if op == "add":
+            t = act.get("task") if isinstance(act.get("task"), dict) else act
+            return f"新建任务 · {str((t or {}).get('name') or (t or {}).get('id', ''))}"
+        if op == "remove":
+            return f"删除任务 {act.get('id', '')}"
+        if op == "toggle":
+            return f"{'启用' if act.get('enabled', True) else '停用'}任务 {act.get('id', '')}"
+        return "列出定时任务"
+    if tool == "market":
+        if str(act.get("op") or "").lower() == "install":
+            return f"安装技能 {act.get('id', '')}"
+        return "列出技能市场"
     if tool == "done":
         return str(act.get("summary", ""))[:120]
     return ""
@@ -609,6 +669,27 @@ def execute_action(cfg: dict, act: dict, confirm=None, cancel=None) -> str:
                                 workdir=str(sk.folder), timeout=timeout)
         return f"[skill {sk.sid} · cwd={sk.folder}]\n{result}"
 
+    # ---------------- 定时任务 / 技能市场 ----------------
+    if tool == "schedule":
+        op = str(act.get("op") or "list").strip().lower()
+        if op == "add":
+            t = act.get("task") if isinstance(act.get("task"), dict) else act
+            ok, msg = scheduler.add_task(t or {})
+        elif op == "remove":
+            ok, msg = scheduler.remove_task(str(act.get("id") or ""))
+        elif op == "toggle":
+            ok, msg = scheduler.toggle_task(str(act.get("id") or ""),
+                                            bool(act.get("enabled", True)))
+        else:
+            return scheduler.list_tasks_text()
+        return ("✅ " if ok else "❌ ") + msg
+
+    if tool == "market":
+        op = str(act.get("op") or "list").strip().lower()
+        if op == "install":
+            return market.install_skill(str(act.get("id") or ""))
+        return market.market_text()
+
     if tool == "wait":
         return tools.wait(act.get("seconds", 1))
 
@@ -685,6 +766,21 @@ class AgentRunner:
             max_steps = max(1, int(cfg.get("max_steps", 12)))
             temperature = float(cfg.get("temperature", 0.7))
             step = 0
+            empty_retries = 0       # 模型偶发吐空正文的重试计数
+            last_img_sent = ""      # 上一张已发给模型的截图路径（缓存复用）
+
+            # function calling 双轨：auto/on 时请求带 tools 定义，
+            # 模型会 FC 就走原生 tool_calls，只会吐文本就走 ```action 解析。
+            api_base = str(api.get("base_url") or "")
+            api_model = str(api.get("model") or "")
+            tools_spec = None
+            if str(cfg.get("native_tools", "auto")).lower() in ("auto", "on"):
+                use_sk = bool(cfg.get("skills_enabled", True)) and bool(skills.active_skills(cfg))
+                tools_spec = prompts.openai_tools(
+                    cfg.get("agent_mode", "both"), screen_ok,
+                    bool(cfg.get("screen_control", True)),
+                    bool(cfg.get("web_search", True)), use_sk,
+                )
 
             while step < max_steps:
                 if cancel.is_set():
@@ -695,22 +791,56 @@ class AgentRunner:
 
                 chunks: list[str] = []
                 think_sent = [False]
+                think_len = [0]
+                show_think = bool(cfg.get("show_reasoning", True))
+                # 思考内容最多往界面推这么多字，防止某些模型无限自我辩论把页面拖死
+                think_cap = 8000
 
-                def _on_think(_t, _sent=think_sent):
+                def _on_think(t, _sent=think_sent):
+                    if not show_think:
+                        return
                     if not _sent[0]:
                         _sent[0] = True
-                        emit({"type": "thinking"})
+                        emit({"type": "thinking"})      # 老 UI 只认这个标记
+                    if think_len[0] >= think_cap:
+                        return
+                    piece = str(t or "")[:think_cap - think_len[0]]
+                    if not piece:
+                        return
+                    think_len[0] += len(piece)
+                    emit({"type": "reasoning", "text": piece})
 
+                fc = None
+                if tools_spec and (api_base, api_model) not in _NATIVE_BLOCKED:
+                    fc = {"tool_calls": [], "finish_reason": "", "usage": None}
+                started = time.time()
+                prompt_chars = _msg_chars(messages)
                 try:
                     for piece in llm.stream_chat(api, messages,
                                                  temperature=temperature,
                                                  cancel=cancel,
-                                                 on_reasoning=_on_think):
+                                                 on_reasoning=_on_think,
+                                                 tools=tools_spec if fc else None,
+                                                 out=fc,
+                                                 extra=cfg.get("extra_params")):
                         chunks.append(piece)
                         emit({"type": "delta", "text": piece})
                 except Exception as e:
+                    # 接口不认 tools 参数 → 拉黑，本步原样重来（不带 tools）
+                    if fc is not None and not chunks and _looks_like_tools_reject(str(e)):
+                        _NATIVE_BLOCKED.add((api_base, api_model))
+                        step -= 1
+                        continue
                     emit({"type": "error", "msg": f"{type(e).__name__}: {e}"})
                     return
+                _u = (fc or {}).get("usage") or {}
+                _reason_tk = ((_u.get("completion_tokens_details") or {})
+                              .get("reasoning_tokens") or 0)
+                usage.record(api_model or "?", "chat",
+                             prompt_chars, len("".join(chunks)), time.time() - started,
+                             in_tokens=_u.get("prompt_tokens"),
+                             out_tokens=_u.get("completion_tokens"),
+                             reasoning_tokens=_reason_tk)
 
                 if cancel.is_set():
                     text = "".join(chunks).strip()
@@ -721,22 +851,50 @@ class AgentRunner:
 
                 full = "".join(chunks).strip()
                 emit({"type": "assistant_end", "text": full})
-                if not full:
-                    emit({"type": "error", "msg": "模型返回了空内容。"})
+
+                fc_calls = (fc or {}).get("tool_calls") or []
+                # 推理模型走原生 FC 时正文常常是空的，只有 tool_calls。
+                # 所以不能拿 full 空就直接判失败 —— 有 tool_calls 就继续走 FC 轨。
+                if not full and not fc_calls:
+                    _fr = (fc or {}).get("finish_reason") or "?"
+                    # 模型端偶发跑偏（见过 reasoning 里冒出 <ds_xxx> 控制 token、
+                    # 正文被清空、finish_reason 还是 stop）。原地重试，最多两次。
+                    if empty_retries < 2 and _fr != "length":
+                        empty_retries += 1
+                        emit({"type": "tool_start", "name": "重试",
+                              "detail": f"模型返回空正文（{_fr}），重试第 {empty_retries} 次"})
+                        step -= 1   # 重试不消耗步数
+                        continue
+                    hint = ""
+                    if _fr == "length":
+                        hint = "（finish_reason=length，思考把额度吃光了，调大 max_tokens 或换非推理模型）"
+                    emit({"type": "error", "msg": f"模型返回了空内容{hint}。"})
                     return
 
-                conv.add_assistant(full)
-                messages.append({"role": "assistant", "content": full})
+                if full:
+                    conv.add_assistant(full)
 
-                actions = parse_actions(full)
-                if not actions:
-                    emit({"type": "done"})
-                    return
+                if fc_calls:
+                    # 原生 FC 轨：assistant 消息带 tool_calls 原文，结果用 role=tool 回。
+                    # 允许一轮多个调用，全部执行。
+                    actions = _fc_actions(fc_calls)
+                    if not actions or not any(a.get("tool") for a in actions):
+                        emit({"type": "done"})
+                        return
+                    messages.append({
+                        "role": "assistant",
+                        "content": strip_actions(full) or None,
+                        "tool_calls": fc_calls,
+                    })
+                else:
+                    actions = parse_actions(full)
+                    if not actions:
+                        emit({"type": "done"})
+                        return
+                    messages.append({"role": "assistant", "content": full})
 
-                # 协议是一轮一个动作。模型偶尔会一口气甩好几个块，
-                # 以前只取第 0 个、其余静默丢掉，模型还当自己都做完了。
-                # 现在把「只执行了一个」写回上下文，让它下一轮重新发。
-                if len(actions) > 1:
+                # 文本协议一轮只执行一个动作；原生 FC 允许多个。
+                if not fc_calls and len(actions) > 1:
                     names = "、".join(str(a.get("tool") or "?") for a in actions)
                     first = str(actions[0].get("tool") or "?").strip()
                     note = (
@@ -750,85 +908,106 @@ class AgentRunner:
                     emit({"type": "tool_start", "name": "提示",
                           "detail": f"收到 {len(actions)} 个动作，只执行第 1 个"})
                     emit({"type": "tool_result", "name": "提示", "text": note})
+                    actions = actions[:1]
 
-                act = actions[0]
-                tool = (act.get("tool") or "").strip()
+                for act in actions:
+                    tool = (act.get("tool") or "").strip()
 
-                if tool == "done":
-                    summary = str(act.get("summary", "")).strip()
-                    conv.add_tool("done", summary or "完成")
-                    emit({"type": "tool_start", "name": "done", "detail": summary})
-                    emit({"type": "tool_result", "name": "done", "text": summary or "完成"})
-                    emit({"type": "done"})
-                    return
+                    if tool == "done":
+                        summary = str(act.get("summary", "")).strip()
+                        conv.add_tool("done", summary or "完成")
+                        emit({"type": "tool_start", "name": "done", "detail": summary})
+                        emit({"type": "tool_result", "name": "done",
+                              "text": summary or "完成"})
+                        emit({"type": "done"})
+                        return
 
-                if tool == "ask":
-                    question = str(act.get("question", "")).strip()
-                    conv.add_tool("ask", question)
-                    emit({"type": "ask", "text": question})
-                    emit({"type": "done"})
-                    return
+                    if tool == "ask":
+                        question = str(act.get("question", "")).strip()
+                        conv.add_tool("ask", question)
+                        emit({"type": "ask", "text": question})
+                        emit({"type": "done"})
+                        return
 
-                emit({
-                    "type": "tool_start",
-                    "name": tool or "?",
-                    "detail": describe_action(act),
-                })
+                    emit({
+                        "type": "tool_start",
+                        "name": tool or "?",
+                        "detail": describe_action(act),
+                    })
 
-                try:
-                    result = execute_action(cfg, act, confirm=confirm, cancel=cancel)
-                except Exception as e:
-                    result = f"【工具异常】{type(e).__name__}: {e}"
-
-                # 截图这类工具会返回 {"text":..., "image":...}，图片要单独塞进对话
-                image_path = ""
-                if isinstance(result, dict):
-                    image_path = str(result.get("image") or "")
-                    result = str(result.get("text") or "")
-                elif not isinstance(result, str):
-                    result = str(result)
-
-                conv.add_tool(tool or "?", result)
-                emit({"type": "tool_result", "name": tool or "?", "text": result})
-
-                if cancel.is_set():
-                    emit({"type": "cancel"})
-                    return
-
-                head = TOOL_RESULT_PREFIX.format(name=tool or "tool") + "\n" + result
-                if image_path:
-                    # 只留最新一张截图。旧图换成文字占位，否则请求体几轮就爆了。
-                    # 注意必须只动「工具结果」消息：用户自己发的图片不能删。
-                    for i, m in enumerate(messages):
-                        parts = m.get("content")
-                        if not isinstance(parts, list):
-                            continue
-                        if not any(p.get("type") == "image_url" for p in parts):
-                            continue
-                        txt = next((p.get("text", "") for p in parts
-                                    if p.get("type") == "text"), "")
-                        if not txt.startswith("[工具 "):
-                            continue
-                        messages[i] = {
-                            "role": m.get("role", "user"),
-                            "content": txt + "\n（旧截图已省略，需要时重新截一张）",
-                        }
                     try:
-                        messages.append({
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": head},
-                                {"type": "image_url",
-                                 "image_url": {"url": llm.data_uri(image_path)}},
-                            ],
-                        })
+                        result = execute_action(cfg, act, confirm=confirm, cancel=cancel)
                     except Exception as e:
+                        result = f"【工具异常】{type(e).__name__}: {e}"
+
+                    # 截图这类工具会返回 {"text":..., "image":...}，图片要单独塞进对话
+                    image_path = ""
+                    if isinstance(result, dict):
+                        image_path = str(result.get("image") or "")
+                        result = str(result.get("text") or "")
+                    elif not isinstance(result, str):
+                        result = str(result)
+
+                    conv.add_tool(tool or "?", result)
+                    emit({"type": "tool_result", "name": tool or "?", "text": result})
+
+                    head = TOOL_RESULT_PREFIX.format(name=tool or "tool") + "\n" + result
+
+                    if fc_calls:
                         messages.append({
-                            "role": "user",
-                            "content": head + f"\n（图片读取失败：{e}）",
+                            "role": "tool",
+                            "tool_call_id": act.get("_tool_call_id") or "call_0",
+                            "content": result,
                         })
-                else:
-                    messages.append({"role": "user", "content": head})
+
+                    if cancel.is_set():
+                        emit({"type": "cancel"})
+                        return
+
+                    if image_path and image_path == last_img_sent:
+                        # 截图缓存复用：画面没变，不重复发同一张图
+                        note = ("（截图与上一张完全相同：画面没有任何变化，"
+                                "这张图不再重复发给你，直接用已看到的内容判断。）")
+                        if not fc_calls:
+                            messages.append({"role": "user", "content": head + "\n" + note})
+                        else:
+                            messages.append({"role": "user", "content": "（系统提示）" + note})
+                        continue
+
+                    if image_path:
+                        # 只留最新一张截图。旧图换成文字占位，否则请求体几轮就爆了。
+                        # 注意必须只动「工具结果」消息：用户自己发的图片不能删。
+                        for i, m in enumerate(messages):
+                            parts = m.get("content")
+                            if not isinstance(parts, list):
+                                continue
+                            if not any(p.get("type") == "image_url" for p in parts):
+                                continue
+                            txt = next((p.get("text", "") for p in parts
+                                        if p.get("type") == "text"), "")
+                            if not txt.startswith("[工具 "):
+                                continue
+                            messages[i] = {
+                                "role": m.get("role", "user"),
+                                "content": txt + "\n（旧截图已省略，需要时重新截一张）",
+                            }
+                        try:
+                            messages.append({
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": head},
+                                    {"type": "image_url",
+                                     "image_url": {"url": llm.data_uri(image_path)}},
+                                ],
+                            })
+                            last_img_sent = image_path
+                        except Exception as e:
+                            messages.append({
+                                "role": "user",
+                                "content": head + f"\n（图片读取失败：{e}）",
+                            })
+                    elif not fc_calls:
+                        messages.append({"role": "user", "content": head})
 
             emit({
                 "type": "error",

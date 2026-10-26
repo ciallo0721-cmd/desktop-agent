@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""agent.py —— 桌面 Agent 入口。
+"""agent.py —— PawPilot 桌面 Agent 入口。
 
 四种前端，共用同一套对话和工具：
     python agent.py            图形界面（默认）
@@ -74,6 +74,19 @@ def main() -> int:
     from app.agent_core import daily_backup
 
     daily_backup()
+
+    # 后台服务：定时任务 + Telegram 通道（没启用就自动跳过）
+    try:
+        from app import config, market, scheduler, channel_telegram
+
+        market.ensure_scaffold()
+        _cfg = config.load_config()
+        if config.is_configured(_cfg):
+            if _cfg.get("scheduler_enabled", True):
+                scheduler.start()
+            channel_telegram.start()
+    except Exception:
+        pass
 
     if mode == "gui":
         from app.ui_main import run

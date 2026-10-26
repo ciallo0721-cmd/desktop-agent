@@ -592,6 +592,8 @@ class App(ctk.CTk):
 
         self._stream_bubble: ChatBubble | None = None
         self._stream_buf = ""
+        self._think_bubble: ChatBubble | None = None
+        self._think_buf = ""
         self._tool_card: ToolCard | None = None
         self._welcome = False
         self._last_ai_text = ""
@@ -872,6 +874,8 @@ class App(ctk.CTk):
             w.destroy()
         self._stream_bubble = None
         self._tool_card = None
+        self._think_bubble = None
+        self._think_buf = ""
         self._welcome = False
         # 必须重置画布：子控件 destroy 后 scrollregion 不会自己收缩，
         # 视图会停在旧位置，新内容看着像一片空白。
@@ -1224,6 +1228,18 @@ class App(ctk.CTk):
         except tk.TclError:
             pass
 
+    def _flush_think(self) -> None:
+        """思考结束：长思考折叠掉，别把正文顶出屏幕。"""
+        if self._think_bubble is None:
+            return
+        n = len(self._think_buf)
+        if n > 800:
+            self._think_bubble.set_text(
+                "〈思考〉" + self._think_buf[:800] + f"\n…（共 {n} 字，已折叠）"
+            )
+        self._think_bubble = None
+        self._think_buf = ""
+
     def _handle(self, evt: dict) -> None:
         kind = evt.get("type")
         cid = evt.get("_cid")
@@ -1232,21 +1248,36 @@ class App(ctk.CTk):
         )
         # 已经切到别的对话了，旧对话的流式内容和工具卡片都不要画
         if stale and kind in (
-            "thinking", "delta", "assistant_end",
+            "thinking", "reasoning", "delta", "assistant_end",
             "tool_start", "tool_result", "ask",
         ):
             return
 
         if kind == "thinking":
-            if self._stream_bubble is None:
+            if not self.cfg.get("show_reasoning", True):
+                return
+            if self._think_bubble is None:
                 self._drop_welcome()
-                self._stream_bubble = ChatBubble(self.chat, "assistant")
-                self._stream_bubble.pack(fill="x")
-                self._stream_buf = ""
-                self._stream_bubble.set_text("正在思考…")
+                self._think_bubble = ChatBubble(self.chat, "assistant")
+                self._think_bubble.pack(fill="x")
+                self._think_buf = ""
+                self._think_bubble.set_text("〈思考〉正在思考…")
                 self._scroll_to_bottom()
 
+        elif kind == "reasoning":
+            if not self.cfg.get("show_reasoning", True):
+                return
+            if self._think_bubble is None:
+                self._drop_welcome()
+                self._think_bubble = ChatBubble(self.chat, "assistant")
+                self._think_bubble.pack(fill="x")
+                self._think_buf = ""
+            self._think_buf += evt.get("text", "")
+            self._think_bubble.set_text("〈思考〉" + self._think_buf)
+            self._scroll_to_bottom()
+
         elif kind == "delta":
+            self._flush_think()
             if self._stream_bubble is None:
                 self._drop_welcome()
                 self._stream_bubble = ChatBubble(self.chat, "assistant")
@@ -1259,6 +1290,7 @@ class App(ctk.CTk):
             self._scroll_to_bottom()
 
         elif kind == "assistant_end":
+            self._flush_think()
             shown = agent_core.strip_actions(evt.get("text", ""))
             if shown:
                 self._last_ai_text = shown
@@ -1273,6 +1305,7 @@ class App(ctk.CTk):
             self._stream_buf = ""
 
         elif kind == "tool_start":
+            self._flush_think()
             if evt.get("name") != "done":     # done 只是终点标记，不用画卡片
                 self._add_tool_card(evt.get("name", "tool"), evt.get("detail", ""))
 
@@ -1288,14 +1321,17 @@ class App(ctk.CTk):
                 self._add_bubble("assistant", text)
 
         elif kind == "done":
+            self._flush_think()
             self._finish_turn()
             self._maybe_memory()
 
         elif kind == "cancel":
+            self._flush_think()
             self._finish_turn()
             self._status("已停止", 2500)
 
         elif kind == "error":
+            self._flush_think()
             self._stream_bubble = None
             self._stream_buf = ""
             self._finish_turn()

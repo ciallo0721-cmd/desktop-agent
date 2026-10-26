@@ -22,6 +22,8 @@ data/images/
 data/agent.log
 data/crash.log
 data/tui.log
+# 用量统计流水
+data/usage.jsonl
 
 # agent 的干活目录，内容随任务变
 workspace/*

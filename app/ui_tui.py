@@ -282,6 +282,8 @@ class TuiApp:
         self.stream_buf = ""
         self.cur_ai = None
         self.cur_tool = None
+        self.think_line = None       # 思考内容在 lines 里的下标
+        self.think_buf = ""
         self.last_ai = ""
         self._cache_key = None
 
@@ -311,9 +313,28 @@ class TuiApp:
                 self.stream_buf = ""
                 self.cur_ai = None
                 self.cur_tool = None
+                self.think_line = None
+                self.think_buf = ""
+                continue
+
+            if kind == "reasoning":
+                if not self.sess.cfg.get("show_reasoning", True):
+                    continue
+                self.think_buf += e.get("text", "")
+                tail = self.think_buf[-400:].replace("\n", " ")
+                if self.think_line is None:
+                    self.push("gry", "思考 › " + tail)
+                    self.think_line = len(self.lines) - 1
+                else:
+                    self.lines[self.think_line] = ("gry", "思考 › " + tail)
+                self.follow = True
+                self.dirty = True
                 continue
 
             if kind == "thinking":
+                # 开思考显示时，正文行由 reasoning 那条顶着，不再占一行占位
+                if self.sess.cfg.get("show_reasoning", True):
+                    continue
                 if self.cur_ai is None:
                     self.push("gry", "AI › 正在思考…")
                     self.cur_ai = len(self.lines) - 1
@@ -747,7 +768,7 @@ class TuiApp:
         # ---- 标题 ----
         model = (self.sess.cfg.get("main_api") or {}).get("model") or "未配置"
         mode = self.sess.cfg.get("agent_mode", "both")
-        title = f" Desktop Agent · {model} · {mode} "
+        title = f" PawPilot · {model} · {mode} "
         out: list[tuple[str, str]] = []
         ttl = cut(title, w - 4)
         out.append(("gry", "╭─" + ttl
