@@ -104,6 +104,10 @@ DEFAULT_CONFIG = {
     },
 
     # ---------------- 远程 / IM / 定时任务 ----------------
+    # 默认前端：web（浏览器界面，零依赖、能在别的设备上用）；gui 是兜底选项
+    "default_mode": "web",
+    # web 模式启动后自动打开浏览器
+    "web_open_browser": True,
     # Web 远程访问：开启后监听 0.0.0.0（局域网可达），必须配 token 才安全
     "web_remote": False,
     "web_token": "",

@@ -7,11 +7,15 @@ cd /d "%~dp0"
 rem ============================================================
 rem  start.bat  -  daily launcher
 rem  usage:
-rem     start.bat            GUI, silent (no console window)
+rem     start.bat            Web UI in browser (default), auto-opens 16800
+rem     start.bat gui        GUI window, silent (no console)
 rem     start.bat cli        CLI, opens its own console window
 rem     start.bat tui        TUI, opens its own console window
-rem     start.bat web        web, opens console + http://127.0.0.1:16800
-rem     start.bat -debug     GUI with console, keep open on error
+rem     start.bat web        same as default
+rem     start.bat -debug     Web with console, keep open on error
+rem
+rem  Web is the default front end. If it cannot start, agent.py
+rem  automatically falls back to the GUI.
 rem ============================================================
 
 set "PY=.venv\Scripts\python.exe"
@@ -25,12 +29,17 @@ if /i "%~1"=="-debug"  goto :debug
 if /i "%~1"=="--debug" goto :debug
 if /i "%~1"=="debug"   goto :debug
 
+if /i "%~1"=="gui" goto :gui
 if /i "%~1"=="cli" goto :console
 if /i "%~1"=="tui" goto :console
-if /i "%~1"=="web" goto :console
+
+rem ---------- Web, default ----------
+start "PawPilot - Web" cmd /c chcp 65001 ^>nul ^&^& %PY% agent.py web
+exit /b 0
 
 rem ---------- GUI, silent ----------
-start "" "%PYW%" agent.py
+:gui
+start "" "%PYW%" agent.py gui
 exit /b 0
 
 rem ---------- console modes ----------

@@ -44,5 +44,9 @@
   "search_api": {
     "provider": "",
     "api_key": ""
-  }
+  },
+  "default_mode": "web",
+  "web_open_browser": true,
+  "web_remote": false,
+  "web_token": ""
 }

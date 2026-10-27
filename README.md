@@ -24,9 +24,13 @@
 
 ```
 双击 first.bat      # 第一次：问 API、装依赖、建 venv、启动
-双击 start.bat      # 之后：直接进 GUI
+双击 start.bat      # 之后：起 Web 界面，浏览器自动打开 16800
+start.bat gui       # 想要原生窗口就走这个
 start.bat -debug    # 带控制台，看报错
 ```
+
+默认前端是 Web。Web 起不来（端口被别的程序占、依赖炸了）会自动回退 GUI。
+想把默认改回 GUI，改 `data/config.json` 的 `"default_mode": "gui"`。
 
 ## 发图片
 
@@ -99,10 +103,22 @@ enabled: true
 
 | 模式 | 启动 | 说明 |
 |---|---|---|
-| **GUI** | `start.bat` 或 `python agent.py` | customtkinter 窗口，默认 |
+| **Web** | `start.bat` 或 `python agent.py` | 浏览器界面，默认；启动后自动开 http://127.0.0.1:16800 |
+| **GUI** | `start.bat gui` 或 `python agent.py gui` | customtkinter 窗口，Web 起不来时自动兜底 |
 | **CLI** | `start.bat cli` 或 `python agent.py cli` | 命令行 REPL，流式打字机 |
 | **TUI** | `start.bat tui` 或 `python agent.py tui` | 命令行里的窗口，ASCII 边框 + 方向键 |
-| **Web** | `start.bat web` 或 `python agent.py web` | 浏览器开 http://127.0.0.1:16800 |
+
+默认前端由 `data/config.json` 的 `default_mode` 决定（`web` / `gui` / `cli` / `tui`）。
+
+### Web 设置面板
+
+右上角「设置」把 GUI 设置里的参数全搬过来了，改完点保存立刻生效（远程开关除外，要重启）：
+
+- **接口**：主对话 API（地址 / Key / 模型）、识图 API、记忆 API。Key 只回显头尾（`sk-a***7890`），留空表示不修改，不会把掩码存回去
+- **模型参数**：温度滑条 + 预设、显示思考、自定义请求参数 JSON
+- **Agent 行为**：用户名、交互方式、最大步数、记忆轮数、命令沙箱档位、屏幕控制、截图直传、联网搜索、技能包
+- **远程访问**：开 `web_remote` + 设 `web_token`（重启生效，没 token 拒绝远程监听）
+
 
 ### CLI 常用命令
 
@@ -148,10 +164,10 @@ TUI 只用 ANSI 转义 + `msvcrt`，不需要装 `windows-curses`。
 ## 目录
 
 ```
-agent.py            入口（认 cli / tui / web 参数）
+agent.py            入口（认 web / gui / cli / tui 参数，默认 web）
 setup_env.py        首装向导 + 环境自检
 first.bat           首装 / 重配
-start.bat           日常启动
+start.bat           日常启动（默认 Web）
 app/
   config.py         路径、配置读写、开机自启
   prompts.py        提示词拼装
@@ -319,7 +335,7 @@ systemprompt.md → memory.md → 是否新对话 → 人设.md → roleprompt.m
 }
 ```
 
-然后 `start.bat web`，控制台会打印带 token 的局域网地址。没设 token 时远程模式拒绝启动，防止裸奔。
+然后 `start.bat`（或 `start.bat web`），控制台会打印带 token 的局域网地址。没设 token 时远程模式拒绝启动，防止裸奔。
 
 ## 已知限制
 
@@ -340,6 +356,8 @@ systemprompt.md → memory.md → 是否新对话 → 人设.md → roleprompt.m
 | `skill_timeout` | `120` | `skill_run` 单次执行超时（秒） |
 | `sandbox_mode` | `off` | `off` = 钉目录+高危拦截；`wsb` = Windows Sandbox 真隔离 |
 | `sandbox_network` | `false` | wsb 模式里沙箱是否允许联网 |
+| `default_mode` | `web` | 默认前端：`web` / `gui` / `cli` / `tui` |
+| `web_open_browser` | `true` | Web 起来后自动打开浏览器 |
 | `web_remote` / `web_token` | `false` / 空 | Web 远程监听开关 + 访问令牌（远程必须配 token） |
 | `telegram` | 关闭 | Telegram 通道配置（enabled / bot_token / allowed_users / proxy） |
 | `scheduler_enabled` | `true` | 定时任务总开关，任务列表在 `data/schedule.json` |

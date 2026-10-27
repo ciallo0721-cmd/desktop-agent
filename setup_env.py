@@ -461,7 +461,7 @@ def launch(py: Path) -> None:
             stdout=log,
             stderr=log,
         )
-        ok("窗口已经拉起来了")
+        ok("已启动（默认 Web 界面，稍后自动打开浏览器）")
         info(f"日志：{log_path}")
     except Exception as e:
         bad(f"启动失败：{e}")

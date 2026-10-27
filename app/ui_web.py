@@ -35,17 +35,87 @@ def _sse(obj: dict) -> bytes:
 MAX_EXTRA_KEYS = 24
 
 
+BOOL_KEYS = (
+    "show_reasoning", "screen_control", "vision_passthrough",
+    "web_search", "skills_enabled", "web_remote",
+)
+
+
+def _mask_key(key: str) -> str:
+    """API Key 只回显头尾，前端留空表示不修改。"""
+    k = str(key or "").strip()
+    if not k:
+        return ""
+    if len(k) <= 8:
+        return "*" * len(k)
+    return f"{k[:4]}***{k[-4:]}"
+
+
+def _sandbox_level(cfg: dict) -> str:
+    if str(cfg.get("sandbox_mode") or "").strip().lower() == "wsb":
+        return "wsb"
+    return "dir" if cfg.get("sandbox", True) else "off"
+
+
+def _api_snapshot(cfg: dict, name: str) -> dict:
+    sec = cfg.get(name)
+    if not isinstance(sec, dict):
+        sec = {}
+    return {
+        "base_url": str(sec.get("base_url") or ""),
+        "model": str(sec.get("model") or ""),
+        "key_hint": _mask_key(sec.get("api_key")),
+        "has_key": bool(str(sec.get("api_key") or "").strip()),
+    }
+
+
 def _settings_snapshot(cfg: dict) -> dict:
     extra = cfg.get("extra_params")
     if not isinstance(extra, dict):
         extra = {}
+    token = str(cfg.get("web_token") or "").strip()
     return {
         "temperature": float(cfg.get("temperature", 0.7) or 0),
         "show_reasoning": bool(cfg.get("show_reasoning", True)),
         "extra_params": extra,
         "native_tools": str(cfg.get("native_tools", "auto")),
         "model": str((cfg.get("main_api") or {}).get("model") or ""),
+        "user_name": str(cfg.get("user_name") or "用户"),
+        "main_api": _api_snapshot(cfg, "main_api"),
+        "vision_api": _api_snapshot(cfg, "vision_api"),
+        "memory_api": _api_snapshot(cfg, "memory_api"),
+        "agent_mode": str(cfg.get("agent_mode", "both")),
+        "max_steps": int(cfg.get("max_steps", 12) or 12),
+        "memory_every": int(cfg.get("memory_every", 6) or 6),
+        "sandbox_level": _sandbox_level(cfg),
+        "sandbox_network": bool(cfg.get("sandbox_network", False)),
+        "screen_control": bool(cfg.get("screen_control", True)),
+        "vision_passthrough": bool(cfg.get("vision_passthrough", True)),
+        "web_search": bool(cfg.get("web_search", True)),
+        "skills_enabled": bool(cfg.get("skills_enabled", True)),
+        "web_remote": bool(cfg.get("web_remote")),
+        "token_set": bool(token),
+        "token_hint": _mask_key(token),
     }
+
+
+def _apply_api_block(cfg: dict, name: str, sec) -> str:
+    """写一个 api 段。api_key 留空 = 保持原值。返回错误文本，空串 = 成功。"""
+    if not isinstance(sec, dict):
+        return f"{name} 格式不对"
+    cur = cfg.get(name)
+    cur = dict(cur) if isinstance(cur, dict) else {}
+    for field in ("base_url", "model"):
+        if field in sec:
+            cur[field] = str(sec.get(field) or "").strip()
+    key = sec.get("api_key")
+    if isinstance(key, str):
+        key = key.strip()
+        # 前端把掩码值回传时忽略，避免把 sk-3***3791 存成真 key
+        if key and "***" not in key:
+            cur["api_key"] = key
+    cfg[name] = cur
+    return ""
 
 
 def _apply_settings(cfg: dict, data: dict) -> tuple[bool, str]:
@@ -59,8 +129,52 @@ def _apply_settings(cfg: dict, data: dict) -> tuple[bool, str]:
             return False, "温度范围 0 ~ 2"
         cfg["temperature"] = round(t, 3)
 
-    if "show_reasoning" in data:
-        cfg["show_reasoning"] = bool(data.get("show_reasoning"))
+    for name in ("main_api", "vision_api", "memory_api"):
+        if name in data:
+            err = _apply_api_block(cfg, name, data.get(name))
+            if err:
+                return False, err
+
+    if "user_name" in data:
+        cfg["user_name"] = str(data.get("user_name") or "").strip() or "用户"
+
+    if "agent_mode" in data:
+        mode = str(data.get("agent_mode") or "").strip().lower()
+        if mode not in ("bash", "screen", "both"):
+            return False, "交互方式只能是 bash / screen / both"
+        cfg["agent_mode"] = mode
+
+    for key, lo, hi, label in (
+        ("max_steps", 1, 60, "最大步数"),
+        ("memory_every", 1, 60, "记忆轮数"),
+    ):
+        if key in data:
+            try:
+                v = int(data.get(key))
+            except (TypeError, ValueError):
+                return False, f"{label}必须是整数"
+            if not (lo <= v <= hi):
+                return False, f"{label}范围 {lo} ~ {hi}"
+            cfg[key] = v
+
+    if "sandbox_level" in data:
+        lvl = str(data.get("sandbox_level") or "").strip().lower()
+        if lvl not in ("off", "dir", "wsb"):
+            return False, "沙箱档位只能是 off / dir / wsb"
+        cfg["sandbox"] = lvl != "off"
+        cfg["sandbox_mode"] = "wsb" if lvl == "wsb" else "off"
+
+    if "sandbox_network" in data:
+        cfg["sandbox_network"] = bool(data.get("sandbox_network"))
+
+    for key in BOOL_KEYS:
+        if key in data:
+            cfg[key] = bool(data.get(key))
+
+    if "web_token" in data:
+        tok = str(data.get("web_token") or "").strip()
+        if tok and "***" not in tok:
+            cfg["web_token"] = tok
 
     if "extra_params" in data:
         raw = data.get("extra_params")
@@ -460,6 +574,32 @@ def make_handler(hub: SessionHub, sess: Session):
     return Handler
 
 
+def _open_browser(url: str) -> None:
+    try:
+        import webbrowser
+
+        webbrowser.open(url)
+    except Exception:
+        pass
+
+
+def _is_our_instance(port: int) -> bool:
+    """端口上是不是已经在跑一个 PawPilot（200 正常 / 401 需要 token 都算）。"""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/settings", timeout=2.0
+        ) as resp:
+            body = resp.read(400)
+        return b"temperature" in body
+    except urllib.error.HTTPError as e:
+        return e.code in (401, 403)
+    except Exception:
+        return False
+
+
 def run(cfg: dict | None = None) -> int:
     sess = Session(cfg)
     hub = SessionHub(sess)
@@ -473,6 +613,17 @@ def run(cfg: dict | None = None) -> int:
         return 1
     host = "0.0.0.0" if remote else HOST
     port = PORT
+
+    url = f"http://{HOST}:{port}" + (f"/?token={token}" if remote else "")
+
+    # Windows 的 SO_REUSEADDR 允许两个进程绑同一端口，会变成两个服务抢请求。
+    # 所以先探一下：已经有 PawPilot 在跑就不要再绑，直接把人送过去。
+    if _is_our_instance(port):
+        print(f"端口 {port} 上已经有一个 PawPilot 在跑了，直接打开浏览器。")
+        print(f"  {url}")
+        print("  要重开一个就先关掉旧的（Ctrl+C 或关掉那个窗口）。")
+        _open_browser(url)
+        return 0
 
     model = (conf.get("main_api") or {}).get("model") or "未配置"
     print("=" * 46)
@@ -496,13 +647,15 @@ def run(cfg: dict | None = None) -> int:
         print("！没有配置主 API Key，发消息会失败。先跑 first.bat。")
 
     try:
-        httpd = ThreadingHTTPServer((HOST, PORT), make_handler(hub, sess))
+        httpd = ThreadingHTTPServer((host, port), make_handler(hub, sess))
     except OSError as e:
-        print(f"端口 {PORT} 起不来：{e}")
+        print(f"端口 {port} 起不来：{e}")
         print("可能已经开着一个了，先关掉再试。")
         return 1
 
     httpd.daemon_threads = True
+    if bool(conf.get("web_open_browser", True)):
+        threading.Timer(0.8, lambda: _open_browser(url)).start()
     try:
         httpd.serve_forever(poll_interval=0.3)
     except KeyboardInterrupt:
@@ -665,7 +818,25 @@ PAGE = r"""<!DOCTYPE html>
   #skList { overflow-y: auto; padding: 8px; }
   #tkList, #stList { overflow-y: auto; padding: 8px; }
   /* ---- 参数面板 ---- */
+  #setPanel { width: 460px; max-height: 84vh; }
   #setBody { overflow-y: auto; padding: 10px 12px; }
+  .setGroup {
+    font-size: 11px; font-weight: 600; color: #9aa1ab; letter-spacing: .08em;
+    margin: 14px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #f0f2f5;
+  }
+  .setGroup:first-child { margin-top: 0; }
+  .setBox {
+    border: 1px solid #eef0f3; border-radius: 7px; padding: 7px 9px;
+    margin-bottom: 10px; background: #fbfcfd;
+  }
+  .setBox summary {
+    font-size: 12px; font-weight: 600; color: #33383f; cursor: pointer;
+    list-style: none; outline: none;
+  }
+  .setBox summary::-webkit-details-marker { display: none; }
+  .setBox summary::before { content: "▸ "; color: #9aa1ab; }
+  .setBox[open] summary::before { content: "▾ "; }
+  .setBox input { margin-top: 7px; }
   .setRow { margin-bottom: 14px; }
   .setRow > label {
     display: block; font-size: 12px; color: #33383f; font-weight: 600;
@@ -675,6 +846,18 @@ PAGE = r"""<!DOCTYPE html>
                  line-height: 1.5; }
   .setRow .val { float: right; font-weight: 400; color: #2f6fed;
                  font-family: Consolas, monospace; }
+  .setRow input[type=text], .setRow input[type=number], .setRow input:not([type]),
+  .setBox input, .setRow select {
+    width: 100%; border: 1px solid #e3e6eb; border-radius: 6px;
+    padding: 6px 8px; font-size: 12px; font-family: inherit; background: #fff;
+    margin-bottom: 6px; color: #33383f;
+  }
+  .setRow select { cursor: pointer; }
+  .setRow input:focus, .setRow select:focus, .setBox input:focus {
+    border-color: #9cc6ff; outline: none;
+  }
+  .setPair { display: flex; gap: 8px; }
+  .setPair > div { flex: 1; }
   #tSlider { width: 100%; margin: 2px 0; accent-color: #2f6fed; }
   #tPresets { display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap; }
   #tPresets button {
@@ -689,7 +872,9 @@ PAGE = r"""<!DOCTYPE html>
     border: 1px solid #e3e6eb; border-radius: 6px; padding: 7px 8px;
   }
   #setBody textarea:focus { border-color: #9cc6ff; outline: none; }
-  .setChk { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .setChk { display: flex; align-items: center; gap: 6px; font-size: 12px;
+            margin: 6px 0; }
+  .setChk input { width: auto; margin: 0; }
   #setSave {
     width: 100%; border: 0; border-radius: 7px; padding: 8px; cursor: pointer;
     background: #2f6fed; color: #fff; font-size: 12.5px; font-family: inherit;
@@ -816,11 +1001,33 @@ PAGE = r"""<!DOCTYPE html>
 
 <div id="setPanel">
   <div id="setHead">
-    <span>请求参数</span>
+    <span>设置</span>
     <span class="sp"></span>
     <span id="setModel" style="font-size:11px;font-weight:400;color:#9aa1ab"></span>
   </div>
   <div id="setBody">
+    <div class="setGroup">接口</div>
+    <div class="setRow">
+      <label>主对话 API</label>
+      <input id="setMainUrl" placeholder="https://api.deepseek.com">
+      <input id="setMainKey" placeholder="API Key（留空不改）" autocomplete="off">
+      <input id="setMainModel" placeholder="模型名，如 deepseek-flash">
+      <div class="sub">接口地址不要带 /chat/completions。</div>
+    </div>
+    <details class="setBox" data-api="vis">
+      <summary>识图 API（看屏幕用，可留空）</summary>
+      <input id="setVisUrl" placeholder="接口地址，留空则用主 API">
+      <input id="setVisKey" placeholder="API Key（留空不改）" autocomplete="off">
+      <input id="setVisModel" placeholder="模型名，留空则用主模型">
+    </details>
+    <details class="setBox" data-api="mem">
+      <summary>记忆总结 API（留空复用主模型）</summary>
+      <input id="setMemUrl" placeholder="接口地址，留空则用主 API">
+      <input id="setMemKey" placeholder="API Key（留空不改）" autocomplete="off">
+      <input id="setMemModel" placeholder="模型名，留空则用主模型">
+    </details>
+
+    <div class="setGroup">模型参数</div>
     <div class="setRow">
       <label>温度 temperature <span class="val" id="tVal">0.7</span></label>
       <input type="range" id="tSlider" min="0" max="2" step="0.05" value="0.7">
@@ -849,6 +1056,49 @@ PAGE = r"""<!DOCTYPE html>
 }'></textarea>
       <div class="sub">原样合并进 /chat/completions 的 payload。<br>
         model / messages / stream / tools 是保留字段，填了也会被忽略。</div>
+    </div>
+
+    <div class="setGroup">Agent 行为</div>
+    <div class="setRow">
+      <label>用户名</label>
+      <input id="setUser" placeholder="用户">
+      <label style="margin-top:8px">交互方式</label>
+      <select id="setMode">
+        <option value="both">两者都用</option>
+        <option value="bash">命令行 Bash</option>
+        <option value="screen">截屏操作</option>
+      </select>
+      <div class="setPair">
+        <div>
+          <label>最大连续步数</label>
+          <input id="setSteps" type="number" min="1" max="60" step="1">
+        </div>
+        <div>
+          <label>记忆每 N 轮总结</label>
+          <input id="setMemEvery" type="number" min="1" max="60" step="1">
+        </div>
+      </div>
+    </div>
+
+    <div class="setRow">
+      <label>命令沙箱</label>
+      <select id="setSandbox">
+        <option value="dir">钉目录 + 高危拦截（快）</option>
+        <option value="off">不限制（自己担风险）</option>
+        <option value="wsb">Windows Sandbox 真隔离（慢，需专业版）</option>
+      </select>
+      <label class="setChk" style="margin-top:8px"><input type="checkbox" id="setSandboxNet"> 沙箱内允许联网</label>
+      <label class="setChk"><input type="checkbox" id="setScreen"> 允许屏幕控制（点击/打字/按键）</label>
+      <label class="setChk"><input type="checkbox" id="setPassthrough"> 截图直接给模型看</label>
+      <label class="setChk"><input type="checkbox" id="setWebSearch"> 联网搜索（web_search / web_fetch）</label>
+      <label class="setChk"><input type="checkbox" id="setSkills"> 启用技能包</label>
+    </div>
+
+    <div class="setGroup">远程访问</div>
+    <div class="setRow">
+      <label class="setChk"><input type="checkbox" id="setRemote"> 允许局域网/公网访问（重启生效）</label>
+      <input id="setToken" placeholder="访问令牌，留空不改" autocomplete="off">
+      <div class="sub">开了远程必须设令牌，否则服务拒绝启动。改完要重启才生效。</div>
     </div>
 
     <button id="setSave">保存</button>
@@ -1203,6 +1453,42 @@ async function loadSettings() {
     ? JSON.stringify(extra, null, 2) : '';
   $('#setModel').textContent = d.model || '';
   $('#model').textContent = d.model || '';
+
+  const main = d.main_api || {}, vis = d.vision_api || {}, mem = d.memory_api || {};
+  $('#setMainUrl').value = main.base_url || '';
+  $('#setMainModel').value = main.model || '';
+  $('#setMainKey').value = '';
+  $('#setMainKey').placeholder = main.has_key
+    ? '已设置 ' + main.key_hint + '（留空不改）' : 'API Key（未设置）';
+  $('#setVisUrl').value = vis.base_url || '';
+  $('#setVisModel').value = vis.model || '';
+  $('#setVisKey').value = '';
+  $('#setVisKey').placeholder = vis.has_key
+    ? '已设置 ' + vis.key_hint + '（留空不改）' : 'API Key（留空则用主 API）';
+  $('#setMemUrl').value = mem.base_url || '';
+  $('#setMemModel').value = mem.model || '';
+  $('#setMemKey').value = '';
+  $('#setMemKey').placeholder = mem.has_key
+    ? '已设置 ' + mem.key_hint + '（留空不改）' : 'API Key（留空则用主模型）';
+
+  $('#setUser').value = d.user_name || '';
+  $('#setMode').value = d.agent_mode || 'both';
+  $('#setSteps').value = d.max_steps;
+  $('#setMemEvery').value = d.memory_every;
+  $('#setSandbox').value = d.sandbox_level || 'dir';
+  $('#setSandboxNet').checked = !!d.sandbox_network;
+  $('#setScreen').checked = !!d.screen_control;
+  $('#setPassthrough').checked = !!d.vision_passthrough;
+  $('#setWebSearch').checked = !!d.web_search;
+  $('#setSkills').checked = !!d.skills_enabled;
+  $('#setRemote').checked = !!d.web_remote;
+  $('#setToken').value = '';
+  $('#setToken').placeholder = d.token_set
+    ? '已设置 ' + d.token_hint + '（留空不改）' : '访问令牌（开了远程必须设）';
+
+  // 识图/记忆有内容时自动展开
+  if (vis.base_url || vis.model) $('[data-api="vis"]').open = true;
+  if (mem.base_url || mem.model) $('[data-api="mem"]').open = true;
 }
 
 function setMsg(text, bad) {
@@ -1236,19 +1522,54 @@ $('#setSave').onclick = async () => {
       return;
     }
   }
+  const num = (sel, dflt) => {
+    const v = parseInt($(sel).value, 10);
+    return Number.isFinite(v) ? v : dflt;
+  };
+  const body = {
+    temperature: parseFloat(tSlider.value),
+    show_reasoning: $('#setThink').checked,
+    extra_params: extra,
+    user_name: $('#setUser').value.trim() || '用户',
+    agent_mode: $('#setMode').value,
+    max_steps: num('#setSteps', 12),
+    memory_every: num('#setMemEvery', 6),
+    sandbox_level: $('#setSandbox').value,
+    sandbox_network: $('#setSandboxNet').checked,
+    screen_control: $('#setScreen').checked,
+    vision_passthrough: $('#setPassthrough').checked,
+    web_search: $('#setWebSearch').checked,
+    skills_enabled: $('#setSkills').checked,
+    web_remote: $('#setRemote').checked,
+    main_api: {
+      base_url: $('#setMainUrl').value.trim(),
+      api_key: $('#setMainKey').value.trim(),
+      model: $('#setMainModel').value.trim()
+    },
+    vision_api: {
+      base_url: $('#setVisUrl').value.trim(),
+      api_key: $('#setVisKey').value.trim(),
+      model: $('#setVisModel').value.trim()
+    },
+    memory_api: {
+      base_url: $('#setMemUrl').value.trim(),
+      api_key: $('#setMemKey').value.trim(),
+      model: $('#setMemModel').value.trim()
+    }
+  };
+  const tok = $('#setToken').value.trim();
+  if (tok) body.web_token = tok;
+
   setMsg('保存中…');
   const r = await fetch(api('/api/settings'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      temperature: parseFloat(tSlider.value),
-      show_reasoning: $('#setThink').checked,
-      extra_params: extra
-    })
+    body: JSON.stringify(body)
   });
   const d = await r.json();
   if (!d.ok) { setMsg(d.err || '保存失败', true); return; }
-  setMsg('已保存 · 下一条消息生效');
   showTemp(d.temperature);
+  await loadSettings();
+  setMsg('已保存 · 下一条消息生效（远程访问需重启）');
 };
 
 // ---------------- 定时任务面板 ----------------

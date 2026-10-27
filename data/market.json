@@ -1,0 +1,9 @@
+[
+  {
+    "id": "example-skill",
+    "name": "示例条目（改掉或删掉）",
+    "description": "把 source 换成真实的 SKILL.md raw 链接 / .zip / git 仓库 URL",
+    "source": "",
+    "sha256": ""
+  }
+]
